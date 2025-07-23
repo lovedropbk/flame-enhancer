@@ -16,13 +16,20 @@ export default async function handler(req, res) {
   const API_KEY = process.env.GEMINI_API_KEY;
   
   if (!API_KEY) {
+    console.error('GEMINI_API_KEY not found in environment variables');
     return res.status(500).json({ error: 'API key not configured' });
   }
 
   try {
     const { endpoint, body } = req.body;
     
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/${endpoint}?key=${API_KEY}`, {
+    if (!endpoint || !body) {
+      return res.status(400).json({ error: 'Missing endpoint or body' });
+    }
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/${endpoint}?key=${API_KEY}`;
+    
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -33,12 +40,13 @@ export default async function handler(req, res) {
     const data = await response.json();
     
     if (!response.ok) {
+      console.error('Gemini API error:', response.status, data);
       return res.status(response.status).json(data);
     }
 
     res.status(200).json(data);
   } catch (error) {
     console.error('Gemini API Error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 }
