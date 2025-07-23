@@ -133,11 +133,33 @@ const App: React.FC = () => {
                 );
                  console.log("AI Photo selection successful, reasons:", aiSelectedPhotosInfo);
             } catch (photoSelectionError) {
-                console.error("AI photo selection failed:", photoSelectionError);
-                const errorMessage = photoSelectionError instanceof Error ? photoSelectionError.message : "An unknown error occurred during photo analysis.";
-                setError(`Failed to analyze your photos. Please try again with different images. Details: ${errorMessage}`);
+                console.error("❌ AI photo selection failed:", photoSelectionError);
+                
+                // Show detailed error information
+                let detailedError = "Unknown error occurred";
+                if (photoSelectionError instanceof Error) {
+                    detailedError = photoSelectionError.message;
+                    console.error("Error details:", {
+                        message: photoSelectionError.message,
+                        stack: photoSelectionError.stack,
+                        name: photoSelectionError.name
+                    });
+                }
+                
+                // Display comprehensive error message
+                setError(`❌ Photo Analysis Failed
+                
+🔍 Error Details: ${detailedError}
+
+📸 Troubleshooting Tips:
+• Try uploading different photos (JPEG/PNG work best)
+• Ensure photos are clear and well-lit
+• Check that faces are visible in the photos
+• Try reducing the number of photos
+
+🔧 Technical Info: Check browser console for detailed logs`);
                 setCurrentStep('photoUpload');
-                return; // Stop the rest of the function.
+                return;
             }
 
             const mappedAiPhotos = aiSelectedPhotosInfo.map(selectedInfo => {
