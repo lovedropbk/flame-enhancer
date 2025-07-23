@@ -1,8 +1,15 @@
-import { GEMINI_TEXT_MODEL, RECOMMENDED_BIO_LENGTH, NUM_PHOTOS_TO_SELECT } from '../constants';
-import { QuestionnaireAnswers, Question, SelectedPhoto, RefinementSettings } from "../types";
+import { GEMINI_TEXT_MODEL, RECOMMENDED_BIO_LENGTH } from '../constants';
+import { QuestionnaireAnswers, RefinementSettings } from "../types";
 
 // Secure API call function that doesn't expose API key
 async function callGeminiAPI(endpoint: string, body: any) {
+  console.log('🔄 Making API call to:', endpoint);
+  console.log('📤 Request body structure:', {
+    contents: body.contents?.length || 0,
+    safetySettings: body.safetySettings?.length || 0,
+    generationConfig: !!body.generationConfig
+  });
+
   try {
     const response = await fetch('/api/gemini', {
       method: 'POST',
@@ -12,14 +19,32 @@ async function callGeminiAPI(endpoint: string, body: any) {
       body: JSON.stringify({ endpoint, body })
     });
 
+    console.log('📡 API Response status:', response.status, response.statusText);
+
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: 'API request failed' }));
-      throw new Error(error.error || 'API request failed');
+      const errorText = await response.text();
+      console.error('❌ API Error Response:', errorText);
+      
+      let errorData;
+      try {
+        errorData = JSON.parse(errorText);
+      } catch {
+        errorData = { error: `HTTP ${response.status}: ${errorText}` };
+      }
+      
+      throw new Error(`API Error (${response.status}): ${errorData.error || errorText}`);
     }
 
-    return response.json();
+    const result = await response.json();
+    console.log('✅ API Success Response structure:', {
+      candidates: result.candidates?.length || 0,
+      usageMetadata: !!result.usageMetadata,
+      modelVersion: result.modelVersion
+    });
+
+    return result;
   } catch (error) {
-    console.error('API call failed:', error);
+    console.error('💥 API call failed:', error);
     throw error;
   }
 }
@@ -50,18 +75,67 @@ const parseJsonFromGeminiResponse = (responseText: string | undefined): any => {
   }
 };
 
-const getVibeString = (value: number | null): string => {
-    if (value === null) return "User is unsure; create a balanced and broadly appealing vibe.";
-    if (value <= 10) return "Sweet & Wholesome";
-    if (value <= 35) return "Kind & Easygoing";
-    if (value <= 60) return "Fun & Balanced";
-    if (value <= 85) return "Confident & Bold";
-    return "Edgy & Provocative";
+// Image conversion utility for maximum compatibility
+const convertImageToJPEG = (file: File): Promise<{ base64Data: string; mimeType: string }> => {
+  return new Promise((resolve, reject) => {
+    console.log('🖼️ Converting image:', file.name, 'Type:', file.type, 'Size:', file.size);
+    
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+    
+    img.onload = () => {
+      console.log('📐 Original dimensions:', img.width, 'x', img.height);
+      
+      // Optimize for mobile and API limits - max 1024px on longest side
+      const maxSize = 1024;
+      let { width, height } = img;
+      
+      if (width > maxSize || height > maxSize) {
+        if (width > height) {
+          height = (height * maxSize) / width;
+          width = maxSize;
+        } else {
+          width = (width * maxSize) / height;
+          height = maxSize;
+        }
+      }
+      
+      canvas.width = width;
+      canvas.height = height;
+      
+      console.log('📐 Resized dimensions:', width, 'x', height);
+      
+      // Draw and convert to JPEG with good quality
+      ctx?.drawImage(img, 0, 0, width, height);
+      
+      try {
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        const base64Data = dataUrl.split(',')[1];
+        
+        console.log('✅ Image converted successfully. New size:', Math.round(base64Data.length * 0.75), 'bytes');
+        
+        resolve({
+          base64Data,
+          mimeType: 'image/jpeg'
+        });
+      } catch (error) {
+        console.error('❌ Canvas conversion failed:', error);
+        reject(new Error(`Failed to convert image: ${error}`));
+      }
+    };
+    
+    img.onerror = (error) => {
+      console.error('❌ Image load failed:', error);
+      reject(new Error(`Failed to load image: ${file.name}`));
+    };
+    
+    img.src = URL.createObjectURL(file);
+  });
 };
 
 export const generateBioFromAnswers = async (
   answers: QuestionnaireAnswers, 
-  questions: Question[], 
   tone?: string,
   refinementSettings?: RefinementSettings
 ): Promise<string> => {
@@ -100,11 +174,32 @@ Return only the bio text, no quotes or formatting.`;
 };
 
 export const selectBestPhotos = async (
-  photos: Array<{id: string, base64Data: string, mimeType: string, fileName: string}>,
+  photos: Array<{id: string, file: File, fileName: string}>,
   numToSelect: number,
   userGender?: string,
   targetGender?: string
 ): Promise<Array<{id: string, reason: string}>> => {
+  console.log('🔍 Starting photo analysis for', photos.length, 'photos, selecting', numToSelect);
+  
+  // Convert all images to JPEG format for maximum compatibility
+  const convertedPhotos = [];
+  for (let i = 0; i < photos.length; i++) {
+    const photo = photos[i];
+    console.log(`📸 Processing photo ${i + 1}/${photos.length}:`, photo.fileName);
+    
+    try {
+      const converted = await convertImageToJPEG(photo.file);
+      convertedPhotos.push({
+        id: photo.id,
+        ...converted,
+        fileName: photo.fileName
+      });
+    } catch (error) {
+      console.error(`❌ Failed to convert photo ${photo.fileName}:`, error);
+      throw new Error(`Failed to process image "${photo.fileName}": ${error}`);
+    }
+  }
+
   const prompt = `Analyze these ${photos.length} photos and select the best ${numToSelect} for a dating profile. Consider attractiveness, photo quality, and variety.
 
 User gender: ${userGender || 'not specified'}
@@ -112,10 +207,10 @@ Target audience: ${targetGender || 'not specified'}
 
 Return a JSON array with exactly ${numToSelect} objects, each with "id" and "reason" fields.`;
 
-  const parts = [{ text: prompt }];
+  const parts: Array<{text: string} | {inlineData: {mimeType: string, data: string}}> = [{ text: prompt }];
   
-  // Add photos as inline data
-  photos.forEach(photo => {
+  // Add converted photos as inline data
+  convertedPhotos.forEach(photo => {
     parts.push({
       inlineData: {
         mimeType: photo.mimeType,

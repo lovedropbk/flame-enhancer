@@ -62,7 +62,7 @@ const App: React.FC = () => {
         setIsBioLoading(true);
         setError(null);
         try {
-            const newBio = await generateBioFromAnswers(currentAnswers, ESSENTIAL_QUESTIONS, undefined, refinementSettings);
+            const newBio = await generateBioFromAnswers(currentAnswers, undefined, refinementSettings);
             console.log("--- Refined Bio received ---", newBio);
             
             setGeneratedProfile(prev => {
@@ -124,8 +124,7 @@ const App: React.FC = () => {
                 aiSelectedPhotosInfo = await selectBestPhotos(
                     photosWithBase64.map(p => ({
                         id: p.id,
-                        base64Data: p.base64Data!,
-                        mimeType: p.mimeType!,
+                        file: p.file,
                         fileName: p.file.name
                     })),
                     NUM_PHOTOS_TO_SELECT,
@@ -177,7 +176,7 @@ const App: React.FC = () => {
         try {
           setLoadingMessage("Crafting your bio...");
           // No refinement settings for initial generation
-          let generatedBioText = await generateBioFromAnswers(currentAnswers, ESSENTIAL_QUESTIONS, undefined, undefined); 
+          let generatedBioText = await generateBioFromAnswers(currentAnswers, undefined, undefined); 
           console.log("--- Step 3: Bio received from service ---");
           console.log("Generated Bio Text:", generatedBioText);
           
@@ -339,7 +338,7 @@ const App: React.FC = () => {
     setError(null);
 
     try {
-      const newBio = await generateBioFromAnswers(essentialAnswers, ESSENTIAL_QUESTIONS, tone);
+      const newBio = await generateBioFromAnswers(essentialAnswers, tone);
       setGeneratedProfile(prev => {
         if (!prev) return null;
         return { ...prev, bio: newBio };
