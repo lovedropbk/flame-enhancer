@@ -3,20 +3,25 @@ import { QuestionnaireAnswers, Question, SelectedPhoto, RefinementSettings } fro
 
 // Secure API call function that doesn't expose API key
 async function callGeminiAPI(endpoint: string, body: any) {
-  const response = await fetch('/api/gemini', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ endpoint, body })
-  });
+  try {
+    const response = await fetch('/api/gemini', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ endpoint, body })
+    });
 
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'API request failed');
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'API request failed' }));
+      throw new Error(error.error || 'API request failed');
+    }
+
+    return response.json();
+  } catch (error) {
+    console.error('API call failed:', error);
+    throw error;
   }
-
-  return response.json();
 }
 
 const DEFAULT_SAFETY_SETTINGS = [

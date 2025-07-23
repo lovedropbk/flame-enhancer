@@ -17,6 +17,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.7.0",
     "terser": "^5.36.0",
     "typescript": "~5.7.2",
