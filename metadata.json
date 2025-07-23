@@ -1,0 +1,9 @@
+{
+  "name": "260713_FlameEnhancer_v8_cloudrun",
+  "description": "An application to help users optimize their online dating profiles by providing bio rewriting and photo style analysis with FlameEnhancer.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "prompt": ""
+}
