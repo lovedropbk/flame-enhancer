@@ -4,6 +4,14 @@
   "outputDirectory": "dist",
   "installCommand": "npm install",
   "devCommand": "npm run dev",
+  "env": {
+    "GEMINI_API_KEY": "@gemini_api_key"
+  },
+  "build": {
+    "env": {
+      "GEMINI_API_KEY": "@gemini_api_key"
+    }
+  },
   "rewrites": [
     {
       "source": "/(.*)",
