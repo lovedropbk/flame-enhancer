@@ -201,7 +201,8 @@ const convertImageToJPEG = (file: File): Promise<{ base64Data: string; mimeType:
 export const generateBioFromAnswers = async (
   answers: QuestionnaireAnswers,
   tone?: string,
-  refinementSettings?: RefinementSettings
+  refinementSettings?: RefinementSettings,
+  currentBio?: string
 ): Promise<string> => {
 
   let promptDetails = "Here's what the user shared about themselves:\n";
@@ -221,6 +222,17 @@ export const generateBioFromAnswers = async (
   });
 
   const toneInstruction = tone ? `An additional specific tone for this bio is **${tone}**. Incorporate this into the overall style.` : '';
+
+  // Add current bio context for refinements
+  let currentBioContext = '';
+  if (currentBio && refinementSettings) {
+    currentBioContext = `
+**CURRENT BIO FOR REFERENCE:**
+"${currentBio}"
+
+**REFINEMENT APPROACH:** Use the current bio as a foundation and enhance it with the new targeting preferences below. Keep what works well and improve what doesn't align with the new targeting goals. This is a refinement, not a complete rewrite.
+`;
+  }
 
   // Add refinement instructions only when provided (advanced refinement flow)
   let refinementInstruction = '';
@@ -262,6 +274,8 @@ export const generateBioFromAnswers = async (
 - **No Name/Age:** DO NOT include the user's name or age in the bio.
 - **Output Format:** Your response MUST be ONLY the bio text itself. No introductions, no explanations, no markdown. Just the pure bio text.
 - **${toneInstruction}**
+
+${currentBioContext}
 
 ${refinementInstruction}
 
@@ -460,8 +474,41 @@ Example format:
 
 export const refineBioWithChatFeedback = async (
   currentBio: string,
-  feedback: string
+  feedback: string,
+  refinementSettings?: RefinementSettings
 ): Promise<string> => {
+  // Add refinement context if available
+  let refinementContext = '';
+  if (refinementSettings) {
+    const vibeString = getVibeString(refinementSettings.targetVibe);
+    const goalString = getGoalString(refinementSettings.relationshipGoal);
+    const sophisticationString = getSophisticationString(refinementSettings.targetSophistication);
+
+    let simplicityInstruction = '';
+    if (refinementSettings.useSimpleLanguage) {
+      simplicityInstruction = `**LANGUAGE OVERRIDE:** Use extremely simple, basic English. Short sentences. Common words only. This is MORE IMPORTANT than sophistication settings.`;
+    }
+
+    let locationInstruction = '';
+    if (refinementSettings.swipeLocation) {
+      if (refinementSettings.locationStatus === 'visiting' && refinementSettings.originLocation) {
+        locationInstruction = `**Location Context:** User is visiting ${refinementSettings.swipeLocation} from ${refinementSettings.originLocation}. Keep this travel context if relevant.`;
+      } else if (refinementSettings.locationStatus === 'living') {
+        locationInstruction = `**Location Context:** User lives in ${refinementSettings.swipeLocation}.`;
+      }
+    }
+
+    refinementContext = `
+**TARGETING CONTEXT (maintain these preferences while applying feedback):**
+${simplicityInstruction}
+- **Target Vibe:** ${vibeString}
+- **Dating Goal:** ${goalString}  
+- **Target Sophistication:** ${sophisticationString}
+${locationInstruction}
+- **Additional Context:** ${refinementSettings.additionalInfo || 'None'}
+`;
+  }
+
   const prompt = `You are an expert dating profile editor. A user has an existing bio and wants to make a small change. Your task is to subtly edit the bio to incorporate the user's feedback while preserving the original tone and core message. Do not rewrite the entire bio from scratch.
 
 **Current Bio:**
@@ -470,8 +517,10 @@ export const refineBioWithChatFeedback = async (
 **User's Request:**
 "${feedback}"
 
+${refinementContext}
+
 **CRITICAL RULES:**
-- Apply the user's change gracefully and intelligently.
+- Apply the user's change gracefully and intelligently while maintaining the targeting preferences above
 - Keep the bio short, modern, and engaging (around 45 words)
 - Your response MUST BE ONLY the edited bio text itself. No introductions, no explanations, no markdown. Just the pure bio text.`;
 

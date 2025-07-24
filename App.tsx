@@ -46,6 +46,7 @@ const App: React.FC = () => {
   const [isBioLoading, setIsBioLoading] = useState<boolean>(false);
   const [isRefinementModalOpen, setIsRefinementModalOpen] = useState<boolean>(false);
   const [chatRefinementCount, setChatRefinementCount] = useState<number>(0);
+  const [currentRefinementSettings, setCurrentRefinementSettings] = useState<RefinementSettings | undefined>(undefined);
 
   const handleStart = useCallback(() => {
     setCurrentStep('essentialQuestionnaire');
@@ -62,7 +63,7 @@ const App: React.FC = () => {
         setIsBioLoading(true);
         setError(null);
         try {
-            const newBio = await generateBioFromAnswers(currentAnswers, undefined, refinementSettings);
+            const newBio = await generateBioFromAnswers(currentAnswers, undefined, refinementSettings, generatedProfile.bio);
             console.log("--- Refined Bio received ---", newBio);
             
             setGeneratedProfile(prev => {
@@ -254,6 +255,7 @@ const App: React.FC = () => {
 
   const handleModalRefinementComplete = useCallback(async (settings: RefinementSettings) => {
     setIsRefinementModalOpen(false);
+    setCurrentRefinementSettings(settings); // Store the refinement settings
     await generateProfileData(essentialAnswers, true, uploadedPhotos, settings);
   }, [essentialAnswers, uploadedPhotos, generatedProfile]);
 
@@ -380,7 +382,7 @@ const App: React.FC = () => {
     setIsBioLoading(true);
     setError(null);
     try {
-      const newBio = await refineBioWithChatFeedback(generatedProfile.bio, feedback);
+      const newBio = await refineBioWithChatFeedback(generatedProfile.bio, feedback, currentRefinementSettings);
       setGeneratedProfile(prev => {
         if (!prev) return null;
         return { ...prev, bio: newBio };
@@ -393,7 +395,7 @@ const App: React.FC = () => {
     } finally {
       setIsBioLoading(false);
     }
-  }, [chatRefinementCount, generatedProfile, isBioLoading]);
+  }, [chatRefinementCount, generatedProfile, isBioLoading, currentRefinementSettings]);
 
 
   const handleReset = useCallback(() => {
@@ -409,6 +411,7 @@ const App: React.FC = () => {
     setIsBioLoading(false);
     setIsRefinementModalOpen(false);
     setChatRefinementCount(0);
+    setCurrentRefinementSettings(undefined);
   }, []);
   
   const renderStep = () => {

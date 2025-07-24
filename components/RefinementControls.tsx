@@ -155,7 +155,7 @@ const RefinementModal: React.FC<RefinementModalProps> = ({ isOpen, onClose, onSu
     >
       <div 
         ref={modalRef}
-        className="bg-slate-800 rounded-2xl shadow-2xl p-6 md:p-8 w-full max-w-lg border border-purple-700 relative transform transition-all duration-300 scale-95 animate-fade-in-up"
+        className="bg-slate-800 rounded-2xl shadow-2xl p-6 md:p-8 w-full max-w-lg max-h-[90vh] overflow-y-auto border border-purple-700 relative transform transition-all duration-300 scale-95 animate-fade-in-up"
         onClick={e => e.stopPropagation()}
       >
         <button 
