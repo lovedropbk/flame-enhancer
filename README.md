@@ -1,6 +1,6 @@
 # Flame Enhancer
 
-A React application powered by Google's Gemini AI for enhancing and processing content.
+A React application powered by OpenAI (gpt-5-mini) for enhancing and processing content.
 
 ## Deployment
 
@@ -10,7 +10,22 @@ This app is configured for easy deployment on Vercel.
 
 Set the following environment variable in your deployment platform:
 
-- `GEMINI_API_KEY`: Your Google Gemini API key
+- `OPENAI_API_KEY`: Your OpenAI API key
+
+### Vercel environment setup
+
+- Dashboard:
+  - Go to your Vercel Project → Settings → Environment Variables
+  - Add OPENAI_API_KEY for Production, Preview, and Development
+  - Trigger a new deploy to apply changes
+
+- CLI:
+  ```bash
+  vercel env add OPENAI_API_KEY production
+  vercel env add OPENAI_API_KEY preview
+  vercel env add OPENAI_API_KEY development
+  ```
+  Then redeploy your project.
 
 ## Local Development
 

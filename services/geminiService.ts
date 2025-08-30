@@ -2,7 +2,7 @@ import { GEMINI_TEXT_MODEL, RECOMMENDED_BIO_LENGTH } from '../constants';
 import { QuestionnaireAnswers, RefinementSettings } from "../types";
 
 // Secure API call function that doesn't expose API key
-async function callGeminiAPI(endpoint: string, body: any) {
+async function callGeminiAPI(endpoint: string, body: any, timeoutMs: number = 60000) {
   console.log('🔄 Making API call to:', endpoint);
   console.log('📤 Request body structure:', {
     contents: body.contents?.length || 0,
@@ -10,13 +10,17 @@ async function callGeminiAPI(endpoint: string, body: any) {
     generationConfig: !!body.generationConfig
   });
 
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
   try {
     const response = await fetch('/api/gemini', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ endpoint, body })
+      body: JSON.stringify({ endpoint, body }),
+      signal: controller.signal
     });
 
     console.log('📡 API Response status:', response.status, response.statusText);
@@ -46,9 +50,14 @@ async function callGeminiAPI(endpoint: string, body: any) {
     console.log('🔍 Complete Gemini API Response:', JSON.stringify(result, null, 2));
 
     return result;
-  } catch (error) {
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      throw new Error(`API call timed out after ${Math.round(timeoutMs / 1000)}s`);
+    }
     console.error('💥 API call failed:', error);
-    throw error;
+    throw (error instanceof Error) ? error : new Error(String(error));
+  } finally {
+    window.clearTimeout(timeoutId);
   }
 }
 
@@ -126,17 +135,35 @@ const getSophisticationString = (value: number | null): string => {
 // Optimized image conversion for AI photo selection - balances quality vs payload size
 const convertImageToJPEG = (file: File): Promise<{ base64Data: string; mimeType: string }> => {
   return new Promise((resolve, reject) => {
-    console.log('�️ oConverting image for AI analysis:', file.name, 'Original size:', Math.round(file.size / 1024) + 'KB');
+    console.log('🖼️ Converting image for AI analysis:', file.name, 'Original size:', Math.round(file.size / 1024) + 'KB');
+
+    // Guard: browsers can't decode HEIC/HEIF via <img>/<canvas>
+    const isHeic = /heic|heif/i.test(file.type) || /\.(heic|heif)$/i.test(file.name || '');
+    if (isHeic) {
+      return reject(new Error(`This browser cannot decode HEIC/HEIF images for analysis. Please use JPEG/PNG/WebP, take a screenshot, or save as JPEG on the device.`));
+    }
 
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     const img = new Image();
 
+    let objectUrl: string | null = null;
+    let timeoutId: number | null = null;
+
+    const cleanup = () => {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+        objectUrl = null;
+      }
+    };
+
     img.onload = () => {
       console.log('📐 Original dimensions:', img.width, 'x', img.height);
 
-      // Better quality for accurate attractiveness assessment
-      // Target: ~300KB per image for better AI analysis while staying under Vercel limits
       const maxSize = 768;
       let { width, height } = img;
 
@@ -155,16 +182,15 @@ const convertImageToJPEG = (file: File): Promise<{ base64Data: string; mimeType:
 
       console.log('📐 AI analysis dimensions:', width, 'x', height);
 
-      // Draw and convert to JPEG with optimized quality for AI analysis
-      ctx?.drawImage(img, 0, 0, width, height);
-
       try {
+        ctx?.drawImage(img, 0, 0, width, height);
+
         // Start with higher quality for better attractiveness assessment
         let quality = 0.85;
         let dataUrl = canvas.toDataURL('image/jpeg', quality);
         let base64Data = dataUrl.split(',')[1];
 
-        // Target ~300KB per image (400000 base64 chars ≈ 300KB) for better quality
+        // Target ~300KB per image (400000 base64 chars ≈ 300KB)
         while (base64Data.length > 400000 && quality > 0.5) {
           quality -= 0.1;
           dataUrl = canvas.toDataURL('image/jpeg', quality);
@@ -177,22 +203,33 @@ const convertImageToJPEG = (file: File): Promise<{ base64Data: string; mimeType:
           compressionRatio: Math.round((file.size / (base64Data.length * 0.75)) * 100) / 100 + 'x'
         });
 
+        cleanup();
         resolve({
           base64Data,
           mimeType: 'image/jpeg'
         });
       } catch (error) {
         console.error('❌ AI analysis conversion failed:', error);
+        cleanup();
         reject(new Error(`Failed to convert image for AI analysis: ${error}`));
       }
     };
 
     img.onerror = (error) => {
       console.error('❌ Image load failed:', error);
+      cleanup();
       reject(new Error(`Failed to load image: ${file.name}`));
     };
 
-    img.src = URL.createObjectURL(file);
+    // Watchdog to avoid indefinite hang if onload/onerror never fire
+    timeoutId = window.setTimeout(() => {
+      console.error('⏰ Image decode timed out:', file.name);
+      cleanup();
+      reject(new Error(`Image decode timed out for ${file.name}. If selected from Google Photos, save the photo to your device first and retry.`));
+    }, 20000);
+
+    objectUrl = URL.createObjectURL(file);
+    img.src = objectUrl;
   });
 };
 
@@ -295,7 +332,7 @@ Now, write a bio that gets swipes. Make it pop.`;
   };
 
   try {
-    const response = await callGeminiAPI(`models/${GEMINI_TEXT_MODEL}:generateContent`, requestBody);
+    const response = await callGeminiAPI(`models/${GEMINI_TEXT_MODEL}:generateContent`, requestBody, 45000);
 
     if (response.candidates && response.candidates[0] && response.candidates[0].content) {
       const text = response.candidates[0].content.parts[0]?.text;
@@ -403,7 +440,7 @@ Example format:
 
   try {
     console.log('🚀 Sending request to Gemini API...');
-    const response = await callGeminiAPI(`models/${GEMINI_TEXT_MODEL}:generateContent`, requestBody);
+    const response = await callGeminiAPI(`models/${GEMINI_TEXT_MODEL}:generateContent`, requestBody, 90000);
 
     if (response.candidates && response.candidates[0] && response.candidates[0].content) {
       const text = response.candidates[0].content.parts[0]?.text;
@@ -536,7 +573,7 @@ ${refinementContext}
   };
 
   try {
-    const response = await callGeminiAPI(`models/${GEMINI_TEXT_MODEL}:generateContent`, requestBody);
+    const response = await callGeminiAPI(`models/${GEMINI_TEXT_MODEL}:generateContent`, requestBody, 30000);
 
     if (response.candidates && response.candidates[0] && response.candidates[0].content) {
       const text = response.candidates[0].content.parts[0]?.text;

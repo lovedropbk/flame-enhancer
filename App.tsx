@@ -18,17 +18,36 @@ import Alert from './components/common/Alert';
 import RefinementModal from './components/RefinementControls';
 
 // Helper function for Base64 conversion
-export const fileToBase64 = (file: File): Promise<{ base64Data: string; mimeType: string }> => {
+export const fileToBase64 = (file: File, timeoutMs: number = 30000): Promise<{ base64Data: string; mimeType: string }> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.readAsDataURL(file);
+    let timedOut = false;
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      try { reader.abort(); } catch {}
+      reject(new Error(`Reading file timed out: ${file.name}`));
+    }, timeoutMs);
+
     reader.onload = () => {
+      if (timedOut) return;
+      window.clearTimeout(timeoutId);
       const result = reader.result as string;
       const base64Data = result.split(',')[1];
       const mimeType = result.substring(result.indexOf(':') + 1, result.indexOf(';'));
       resolve({ base64Data, mimeType });
     };
-    reader.onerror = error => reject(error);
+    reader.onerror = (error) => {
+      if (timedOut) return;
+      window.clearTimeout(timeoutId);
+      reject(error instanceof Error ? error : new Error('Unknown FileReader error'));
+    };
+    reader.onabort = () => {
+      if (timedOut) return;
+      window.clearTimeout(timeoutId);
+      reject(new Error('File read aborted'));
+    };
+
+    reader.readAsDataURL(file);
   });
 };
 
@@ -54,9 +73,25 @@ const App: React.FC = () => {
   }, []);
 
   const generateProfileData = async (currentAnswers: QuestionnaireAnswers, isFinalStage: boolean, currentUploadedPhotos: UploadedPhoto[], refinementSettings?: RefinementSettings) => {
+    // Watchdog helper: ensures we never hang indefinitely on mobile
+    function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+      return new Promise<T>((resolve, reject) => {
+        const t = window.setTimeout(() => {
+          reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`));
+        }, ms);
+        p.then((v) => {
+          window.clearTimeout(t);
+          resolve(v);
+        }).catch((err) => {
+          window.clearTimeout(t);
+          reject(err);
+        });
+      });
+    }
+
     console.log("--- generateProfileData ---");
     console.log("isFinalStage:", isFinalStage);
-    
+    let analyzingWatchdogId: number | null = null;
     // Bio-only refinement flow (no photo changes, no full-screen loader)
     if (isFinalStage && generatedProfile) {
         console.log("--- Refining Bio Only ---");
@@ -89,6 +124,15 @@ const App: React.FC = () => {
     setLoadingMessage("Crafting your initial profile...");
     setCurrentStep('analyzingPreliminary');
 
+    // Watchdog for long-running analyzing on mobile (e.g., cloud-only Google Photos or decode stalls)
+    analyzingWatchdogId = window.setTimeout(() => {
+      console.error('Analyzing watchdog timeout fired');
+      setError(`This is taking longer than expected. On some Android devices, selecting from Google Photos provides cloud-only items that cannot be processed directly. Save the photo(s) to your device first, then retry.`);
+      setCurrentStep('photoUpload');
+      setIsLoading(false);
+    }, 60000);
+
+    setGenerationProgress(0);
     const progressInterval = setInterval(() => {
         setGenerationProgress(prev => {
             if (prev === null) {
@@ -99,7 +143,6 @@ const App: React.FC = () => {
             return prev + (95 / 300);
         });
     }, 100);
-    setGenerationProgress(0);
 
     try {
         let newBio = "Bio generation failed or was skipped. Please try again.";
@@ -109,28 +152,35 @@ const App: React.FC = () => {
             console.log("--- Step 2a: Starting photo selection ---");
             setLoadingMessage("Analyzing your photos...");
             
-            const photosWithBase64 = await Promise.all(
-                currentUploadedPhotos.map(async (p) => {
-                    if (!p.base64Data || !p.mimeType) {
-                    const { base64Data, mimeType } = await fileToBase64(p.file);
-                    return { ...p, base64Data, mimeType };
-                    }
-                    return p;
-                })
-            );
+            // Lightweight path (mobile-friendly): avoid pre-reading files to base64.
+            // Pass File objects directly to the selector and guard against cloud-only selections.
+            const photosForSelection = currentUploadedPhotos;
+            for (const p of photosForSelection) {
+                const name = p.file?.name || 'selected photo';
+                const size = typeof p.file?.size === 'number' ? p.file.size : -1;
+                if (!p.file || size === 0) {
+                    setError(`The file "${name}" isn’t available locally on this device. Please save it to your device first and retry.`);
+                    setCurrentStep('photoUpload');
+                    return;
+                }
+            }
             
             let aiSelectedPhotosInfo: Array<{ id: string; reason: string }> = [];
             try {
                 console.log("Calling selectBestPhotos service...");
-                aiSelectedPhotosInfo = await selectBestPhotos(
-                    photosWithBase64.map(p => ({
-                        id: p.id,
-                        file: p.file,
-                        fileName: p.file.name
+                aiSelectedPhotosInfo = await withTimeout(
+                  selectBestPhotos(
+                    photosForSelection.map(p => ({
+                      id: p.id,
+                      file: p.file,
+                      fileName: p.file.name
                     })),
                     NUM_PHOTOS_TO_SELECT,
                     currentAnswers.q0_gender,
                     currentAnswers.q0_target_gender
+                  ),
+                  45000,
+                  'Photo analysis'
                 );
                  console.log("AI Photo selection successful, reasons:", aiSelectedPhotosInfo);
             } catch (photoSelectionError) {
@@ -199,7 +249,11 @@ const App: React.FC = () => {
         try {
           setLoadingMessage("Crafting your bio...");
           // No refinement settings for initial generation
-          let generatedBioText = await generateBioFromAnswers(currentAnswers, undefined, undefined); 
+          let generatedBioText = await withTimeout(
+            generateBioFromAnswers(currentAnswers, undefined, undefined),
+            45000,
+            'Bio generation'
+          );
           console.log("--- Step 3: Bio received from service ---");
           console.log("Generated Bio Text:", generatedBioText);
           
@@ -231,12 +285,18 @@ const App: React.FC = () => {
           setCurrentStep('preliminaryResults'); 
         }
     } finally {
+        if (analyzingWatchdogId !== null) {
+          window.clearTimeout(analyzingWatchdogId);
+          analyzingWatchdogId = null;
+        }
         clearInterval(progressInterval);
+        // Finalize determinate phase at 100% and immediately unmount loader
         setGenerationProgress(100);
+        setIsLoading(false);
+        // Cleanup progress on the next tick (loader already unmounted)
         setTimeout(() => {
-            setIsLoading(false);
             setGenerationProgress(null);
-        }, 500);
+        }, 0);
     }
   };
 
@@ -443,8 +503,9 @@ const App: React.FC = () => {
             numToSelect={NUM_PHOTOS_TO_SELECT}
           />
         );
-      case 'analyzingPreliminary': 
-      case 'analyzingFinal': 
+      case 'analyzingPreliminary':
+      case 'analyzingFinal':
+        // Always render the spinner during analyzing steps; progress may be determinate or fallback.
         return <LoadingSpinner message={loadingMessage} progress={generationProgress} />;
       case 'preliminaryResults':
       case 'finalResults':

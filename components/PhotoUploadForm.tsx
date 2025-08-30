@@ -50,7 +50,14 @@ const PhotoUploadForm: React.FC<PhotoUploadFormProps> = ({ onSubmit, maxPhotos, 
     }
 
     const newUploadedPhotos: UploadedPhoto[] = filesToProcess
-      .filter(file => file.type.startsWith('image/')) // Basic client-side type check
+      .filter(file => {
+        // Robust image detection:
+        // - Prefer MIME type when available (covers JPEG, PNG, WEBP, HEIC/HEIF, AVIF if the UA provides it)
+        // - Fallback to filename extension for cases where Android/Photos omits MIME
+        const hasImageMime = typeof file.type === 'string' && file.type.startsWith('image/');
+        const seemsImageByExt = /\.(jpe?g|png|webp|heic|heif|avif)$/i.test(file.name || '');
+        return hasImageMime || seemsImageByExt;
+      })
       .map(file => ({
         id: `${file.name}-${Date.now()}-${Math.random()}`, // More unique ID
         file,
@@ -58,7 +65,7 @@ const PhotoUploadForm: React.FC<PhotoUploadFormProps> = ({ onSubmit, maxPhotos, 
       }));
     
     if (newUploadedPhotos.length !== filesToProcess.length) {
-        setError(`Some files were not valid image types and were ignored. Please upload JPEG, PNG, or WEBP files.`);
+        setError(`Some files were not recognized as images and were ignored. Supported types include JPEG, PNG, WebP, HEIC/HEIF, and AVIF.`);
     }
 
     setSelectedFiles(prev => [...prev, ...newUploadedPhotos.map(p => p.file)]);
@@ -218,7 +225,7 @@ const PhotoUploadForm: React.FC<PhotoUploadFormProps> = ({ onSubmit, maxPhotos, 
           ref={fileInputRef}
           type="file"
           multiple
-          accept="image/jpeg, image/png, image/webp"
+          accept="image/*"
           onChange={handleFileChange}
           className="hidden"
         />
