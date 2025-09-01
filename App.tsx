@@ -70,26 +70,9 @@ const App: React.FC = () => {
     setError(null);
   }, []);
 
-  const generateProfileData = async (currentAnswers: QuestionnaireAnswers, isFinalStage: boolean, currentUploadedPhotos: UploadedPhoto[], refinementSettings?: RefinementSettings) => {
-    // Watchdog helper: ensures we never hang indefinitely on mobile
-    function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-      return new Promise<T>((resolve, reject) => {
-        const t = window.setTimeout(() => {
-          reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`));
-        }, ms);
-        p.then((v) => {
-          window.clearTimeout(t);
-          resolve(v);
-        }).catch((err) => {
-          window.clearTimeout(t);
-          reject(err);
-        });
-      });
-    }
-
+  const generateProfileData = async (currentAnswers: QuestionnaireAnswers, isFinalStage: boolean, currentUploadedPhotos: UploadedPhoto[], refinementSettings?: RefinementSettings, onProgress?: (progress: number) => void) => {
     console.log("--- generateProfileData ---");
     console.log("isFinalStage:", isFinalStage);
-    let analyzingWatchdogId: number | null = null;
     // Bio-only refinement flow (no photo changes, no full-screen loader)
     if (isFinalStage && generatedProfile) {
         console.log("--- Refining Bio Only ---");
@@ -134,14 +117,6 @@ const App: React.FC = () => {
     setLoadingMessage("Crafting your initial profile...");
     setCurrentStep('analyzingPreliminary');
 
-    // Watchdog for long-running analyzing on mobile (e.g., cloud-only Google Photos or decode stalls)
-    analyzingWatchdogId = window.setTimeout(() => {
-      console.error('Analyzing watchdog timeout fired');
-      setError(`This is taking longer than expected. On some Android devices, selecting from Google Photos provides cloud-only items that cannot be processed directly. Save the photo(s) to your device first, then retry.`);
-      setCurrentStep('photoUpload');
-      setIsLoading(false);
-    }, 60000);
-
     setGenerationProgress(0);
     const progressInterval = setInterval(() => {
         setGenerationProgress(prev => {
@@ -178,8 +153,7 @@ const App: React.FC = () => {
             let aiSelectedPhotosInfo: Array<{ id: string; reason: string }> = [];
             try {
                 console.log("Calling selectBestPhotos service...");
-                aiSelectedPhotosInfo = await withTimeout(
-                  selectBestPhotos(
+                aiSelectedPhotosInfo = await selectBestPhotos(
                     photosForSelection.map(p => ({
                       id: p.id,
                       file: p.file,
@@ -187,11 +161,9 @@ const App: React.FC = () => {
                     })),
                     NUM_PHOTOS_TO_SELECT,
                     currentAnswers.q0_gender,
-                    currentAnswers.q0_target_gender
-                  ),
-                  45000,
-                  'Photo analysis'
-                );
+                    currentAnswers.q0_target_gender,
+                    onProgress
+                  );
                  console.log("AI Photo selection successful, reasons:", aiSelectedPhotosInfo);
             } catch (photoSelectionError) {
                 console.error("❌ AI photo selection failed:", photoSelectionError);
@@ -260,11 +232,7 @@ const App: React.FC = () => {
         try {
           setLoadingMessage("Crafting your bio...");
           // No refinement settings for initial generation
-          const genResp = await withTimeout(
-            generateBioFromAnswers(currentAnswers, undefined, undefined),
-            45000,
-            'Bio generation'
-          );
+          const genResp = await generateBioFromAnswers(currentAnswers, undefined, undefined);
           console.log("--- Step 3: Bio received from service ---");
           console.log("Generated Bio Text:", genResp);
           
@@ -298,10 +266,6 @@ const App: React.FC = () => {
           setCurrentStep('preliminaryResults'); 
         }
     } finally {
-        if (analyzingWatchdogId !== null) {
-          window.clearTimeout(analyzingWatchdogId);
-          analyzingWatchdogId = null;
-        }
         clearInterval(progressInterval);
         // Finalize determinate phase at 100% and immediately unmount loader
         setGenerationProgress(100);
@@ -320,7 +284,7 @@ const App: React.FC = () => {
     setError(null);
   }, []);
 
-  const handlePhotosSubmitted = useCallback(async (photos: UploadedPhoto[]) => {
+  const handlePhotosSubmitted = useCallback(async (photos: UploadedPhoto[], onProgress: (progress: number) => void) => {
     console.log("--- Step 1b: Photos submitted ---", photos);
     // Additional structured logging for mobile debugging and payload budgeting
     try {
@@ -338,7 +302,7 @@ const App: React.FC = () => {
     }
 
     setUploadedPhotos(photos);
-    await generateProfileData(essentialAnswers, false, photos);
+    await generateProfileData(essentialAnswers, false, photos, undefined, onProgress);
   }, [essentialAnswers]);
 
   const handleModalRefinementComplete = useCallback(async (settings: RefinementSettings) => {

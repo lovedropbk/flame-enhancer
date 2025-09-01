@@ -8,7 +8,7 @@ import Alert from './common/Alert';
 import LoadingSpinner from './LoadingSpinner';
 
 interface PhotoUploadFormProps {
-  onSubmit: (photos: UploadedPhoto[]) => void;
+  onSubmit: (photos: UploadedPhoto[], onProgress: (progress: number) => void) => void;
   maxPhotos: number;
   numToSelect: number;
 }
@@ -19,6 +19,7 @@ const PhotoUploadForm: React.FC<PhotoUploadFormProps> = ({ onSubmit, maxPhotos, 
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isCompressing, setIsCompressing] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [showOverlay, setShowOverlay] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const expectingFileRef = useRef(false);
@@ -192,7 +193,10 @@ const PhotoUploadForm: React.FC<PhotoUploadFormProps> = ({ onSubmit, maxPhotos, 
       return;
     }
     setError(null);
-    onSubmit(photoPreviews);
+    setUploadProgress(0);
+    onSubmit(photoPreviews, (progress) => {
+      setUploadProgress(progress);
+    });
   };
 
   return (
@@ -228,6 +232,16 @@ const PhotoUploadForm: React.FC<PhotoUploadFormProps> = ({ onSubmit, maxPhotos, 
             <div className="flex flex-col items-center">
               <LoadingSpinner />
               <span className="mt-4 text-lg text-slate-300">Optimizing images...</span>
+            </div>
+          ) : uploadProgress !== null ? (
+            <div className="w-full">
+              <div className="flex justify-between mb-1">
+                <span className="text-base font-medium text-purple-300">Uploading...</span>
+                <span className="text-sm font-medium text-purple-300">{Math.round(uploadProgress)}%</span>
+              </div>
+              <div className="w-full bg-slate-600 rounded-full h-2.5">
+                <div className="bg-purple-500 h-2.5 rounded-full" style={{ width: `${uploadProgress}%` }}></div>
+              </div>
             </div>
           ) : (
             <>

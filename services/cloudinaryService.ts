@@ -110,72 +110,62 @@ export const buildAnalysisUrl = (originalUrl: string, maxWidth: number = 640): s
  * - original: original asset URL
  * - analysis: a transformed delivery URL suited for model ingestion (smaller width/quality)
  */
-export const uploadForAnalysis = async (file: File, maxWidth: number = 640): Promise<{ original: string; analysis: string; }> => {
-    console.log(`[cloudinaryService] [analysis] Starting upload process...`);
-    console.log(`[cloudinaryService] File details:`, {
-        name: file.name,
-        sizeMB: (file.size / (1024 * 1024)).toFixed(2),
-        type: file.type
-    });
+export const uploadForAnalysis = async (file: File, maxWidth: number = 640, onProgress?: (progress: number) => void): Promise<{ original: string; analysis: string; }> => {
+    console.log(`[cloudinaryService] [analysis] Starting upload process for ${file.name}`);
 
-    // Step 1: Get signature from our backend
-    console.log('[cloudinaryService] Requesting signature from backend...');
-    const sigResponse = await fetch('/api/cloudinary-signature');
-    console.log(`[cloudinaryService] Signature response status: ${sigResponse.status}`);
-    
-    if (!sigResponse.ok) {
-        if (sigResponse.status === 503) {
-            console.warn("[cloudinaryService] Cloudinary is not configured on server. Cannot perform direct upload.");
-            throw new Error('CLOUDINARY_UNCONFIGURED');
-        }
-        const errorText = await sigResponse.text();
-        console.error('[cloudinaryService] Failed to get signature:', errorText);
-        throw new Error(`Failed to get Cloudinary signature: ${sigResponse.status} - ${errorText}`);
-    }
-    
-    const sigData = await sigResponse.json();
-    console.log('[cloudinaryService] Received signature data:', {
-        hasSignature: !!sigData.signature,
-        hasApiKey: !!sigData.apikey,
-        cloudName: sigData.cloudname,
-        uploadPreset: sigData.upload_preset
-    });
+    // High-quality, but reasonably compressed, settings for the original upload
+    const uploadPreset = 'magify'; // Assuming this is your general-purpose preset
 
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('api_key', sigData.apikey);
-    formData.append('timestamp', sigData.timestamp);
-    formData.append('signature', sigData.signature);
-    formData.append('upload_preset', sigData.upload_preset);
+    formData.append('upload_preset', uploadPreset);
 
-    const cloudinaryUrl = `https://api.cloudinary.com/v1_1/${sigData.cloudname}/image/upload`;
-    console.log(`[cloudinaryService] Uploading to Cloudinary URL: ${cloudinaryUrl}`);
+    const cloudinaryUrl = `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`;
 
-    // Step 2: Upload directly to Cloudinary
-    const response = await fetch(cloudinaryUrl, { method: 'POST', body: formData });
-    console.log(`[cloudinaryService] Cloudinary upload response: ${response.status} ${response.statusText}`);
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', cloudinaryUrl, true);
 
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        console.error('[cloudinaryService] Direct Cloudinary upload failed:', {
-            status: response.status,
-            statusText: response.statusText,
-            error: errorData
-        });
-        const errorMessage = errorData?.error?.message || `Cloudinary error ${response.status}`;
-        throw new Error(`Cloudinary upload failed: ${errorMessage}`);
-    }
+        xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable && onProgress) {
+                const progress = (event.loaded / event.total) * 100;
+                onProgress(progress);
+            }
+        };
 
-  const data = await response.json();
-  const originalUrl = data.secure_url;
-  if (!originalUrl) {
-    throw new Error('Cloudinary analysis upload succeeded but did not provide secure_url');
-  }
+        xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                const data = JSON.parse(xhr.responseText);
+                const originalUrl = data.secure_url;
+                if (!originalUrl) {
+                    reject(new Error('Cloudinary analysis upload succeeded but did not provide secure_url'));
+                    return;
+                }
+                const analysisUrl = buildAnalysisUrl(originalUrl, maxWidth);
+                console.log('[cloudinaryService] [analysis] URLs:', { originalUrl, analysisUrl });
+                resolve({ original: originalUrl, analysis: analysisUrl });
+            } else {
+                try {
+                    const errorData = JSON.parse(xhr.responseText);
+                    const errorMessage = errorData?.error?.message || `Cloudinary error ${xhr.status}`;
+                    console.error('[cloudinaryService] Direct Cloudinary upload failed:', {
+                        status: xhr.status,
+                        statusText: xhr.statusText,
+                        error: errorData
+                    });
+                    reject(new Error(`Cloudinary upload failed: ${errorMessage}`));
+                } catch (e) {
+                    reject(new Error(`Cloudinary upload failed with status ${xhr.status}: ${xhr.statusText}`));
+                }
+            }
+        };
 
-  const analysisUrl = buildAnalysisUrl(originalUrl, maxWidth);
-  console.log('[cloudinaryService] [analysis] URLs:', { originalUrl, analysisUrl });
+        xhr.onerror = () => {
+            reject(new Error('Network error during Cloudinary upload.'));
+        };
 
-  return { original: originalUrl, analysis: analysisUrl };
+        xhr.send(formData);
+    });
 };
 
 

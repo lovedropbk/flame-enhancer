@@ -175,8 +175,6 @@ const convertImageToJPEG = (file: File, options: EncodeOptions = {}): Promise<{ 
     minDimension = 384,
     initialQuality = 0.85,
     minQuality = 0.35,
-    qualityStep = 0.07,
-    dimensionStep = 0.85,
   } = options;
 
   return new Promise((resolve, reject) => {
@@ -545,7 +543,8 @@ export const selectBestPhotos = async (
   photos: Array<{ id: string, file: File, fileName: string }>,
   numToSelect: number,
   userGender?: string,
-  targetGender?: string
+  targetGender?: string,
+  onProgress?: (progress: number) => void
 ): Promise<Array<{ id: string, reason: string }>> => {
   console.log('🔍 Starting photo analysis for', photos.length, 'photos, selecting', numToSelect);
   console.log('📊 Photo sizes:', photos.map(p => ({
@@ -710,7 +709,12 @@ Example format:
         sizeMB: (p.file.size / (1024 * 1024)).toFixed(2)
       });
       try {
-        const { analysis } = await uploadForAnalysis(p.file, maxWidth);
+        const { analysis } = await uploadForAnalysis(p.file, maxWidth, (progress) => {
+            if (onProgress) {
+                const overallProgress = (i + progress / 100) / photos.length * 100;
+                onProgress(overallProgress);
+            }
+        });
         console.log(`✅ Upload successful for ${p.fileName}, URL: ${analysis}`);
         analysisUrls.push(analysis);
         idMap.push(p.id);
