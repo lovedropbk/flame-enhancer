@@ -1,18 +1,67 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { v2 as cloudinary } from "cloudinary";
+
+const isCloudinaryConfigured =
+  process.env.CLOUDINARY_CLOUD_NAME &&
+  process.env.CLOUDINARY_API_KEY &&
+  process.env.CLOUDINARY_API_SECRET;
+
+if (isCloudinaryConfigured) {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+    secure: true,
+  });
+} else {
+    console.warn("⚠️ Cloudinary credentials are not fully configured. Direct upload will be disabled.");
+}
+
+// Helper utilities for detailed logging/measurement on server side
+const ESTIMATE_BYTES_FROM_BASE64 = (charLen) => Math.floor((charLen || 0) * 0.75);
+const safeJsonLength = (obj) => {
+  try { return JSON.stringify(obj).length; } catch { return -1; }
+};
+// Soft caps for observability; requests over ~4.5MB may be rejected by the platform before reaching this code
+const SERVER_JSON_SOFT_WARN = 3_900_000; // ~3.9MB
+const INLINE_BYTES_SOFT_WARN = 3_400_000; // ~3.4MB worth of base64 payload (raw decoded bytes)
+
+async function fetchUrlAsInlineData(url, index) {
+  console.log("🌐 Fetching image URL for inlineData", { index, url });
+  let resp;
+  try {
+    resp = await fetch(url);
+  } catch (e) {
+    console.error("❌ Failed to fetch image URL", { index, url, error: e?.message || String(e) });
+    throw new Error(`Failed to fetch image for analysis at ${url}: ${e?.message || e}`);
+  }
+  if (!resp.ok) {
+    console.error("❌ Non-OK response when fetching image", {
+      index, url, status: resp.status, statusText: resp.statusText
+    });
+    throw new Error(`Image fetch failed: ${resp.status} ${resp.statusText}`);
+  }
+  const mimeType = resp.headers.get("content-type") || "image/jpeg";
+  const ab = await resp.arrayBuffer();
+  const b64 = Buffer.from(new Uint8Array(ab)).toString("base64");
+  return { mimeType, data: b64, rawBytes: ab.byteLength };
+}
 
 export default async function handler(req, res) {
   // Enhanced logging for debugging
+  const serverBodyLen = safeJsonLength(req.body);
   console.log("🚀 API Handler called:", {
     method: req.method,
     url: req.url,
     timestamp: new Date().toISOString(),
     headers: Object.keys(req.headers),
     hasBody: !!req.body,
+    approxJsonBodyBytes: serverBodyLen,
   });
 
   // Set CORS headers
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   if (req.method === "OPTIONS") {
@@ -21,12 +70,17 @@ export default async function handler(req, res) {
     return;
   }
 
+
   if (req.method !== "POST") {
     console.log("❌ Invalid method:", req.method);
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const provider = (process.env.AI_PROVIDER || "gemini").toLowerCase();
+  const provider = (
+    typeof (req.body?.provider) === "string" && req.body.provider
+      ? req.body.provider
+      : (process.env.AI_PROVIDER || "gemini")
+  ).toLowerCase();
   const { endpoint, body } = req.body || {};
 
   console.log("🤖 Provider selection:", { provider });
@@ -36,8 +90,18 @@ export default async function handler(req, res) {
       contents: body?.contents?.length || 0,
       safetySettings: body?.safetySettings?.length || 0,
       generationConfig: !!body?.generationConfig,
+      imageUrls: Array.isArray(body?.imageUrls) ? body.imageUrls.length : 0,
     },
   });
+
+  // Preflight body-size observability (note: 413 may still occur upstream before this code runs)
+  if (serverBodyLen > SERVER_JSON_SOFT_WARN) {
+    console.warn("⚠️ Server observed large JSON payload:", {
+      approxJsonBodyBytes: serverBodyLen,
+      warnThreshold: SERVER_JSON_SOFT_WARN,
+      note: "If you see client-side 413 and no server logs, the edge rejected the request before invocation.",
+    });
+  }
 
   if (provider === "gemini") {
     const API_KEY = process.env.GOOGLE_GENAI_API_KEY;
@@ -67,22 +131,82 @@ export default async function handler(req, res) {
       const genAI = new GoogleGenerativeAI(API_KEY);
       const model = genAI.getGenerativeModel({ model: modelName });
 
+      // Normalize Gemini generationConfig to the correct field (maxOutputTokens)
+      const rawGen = typeof body?.generationConfig === "object" && body.generationConfig ? body.generationConfig : {};
+      let normalizedGen = { ...rawGen };
+      const candidateMax =
+        typeof rawGen.maxOutputTokens === "number"
+          ? rawGen.maxOutputTokens
+          : typeof rawGen.max_completion_tokens === "number"
+          ? rawGen.max_completion_tokens
+          : typeof rawGen.max_tokens === "number"
+          ? rawGen.max_tokens
+          : undefined;
+      if (typeof candidateMax === "number") {
+        normalizedGen = { ...rawGen, maxOutputTokens: candidateMax };
+        delete normalizedGen.max_completion_tokens;
+        delete normalizedGen.max_tokens;
+      }
+
       const requestPayload = {
         contents: Array.isArray(body?.contents) ? body.contents : [],
         ...(body?.safetySettings ? { safetySettings: body.safetySettings } : {}),
-        ...(body?.generationConfig ? { generationConfig: body.generationConfig } : {}),
+        ...(Object.keys(normalizedGen).length ? { generationConfig: normalizedGen } : {}),
       };
 
+      // If client provided external image URLs (e.g., Cloudinary analysis URLs),
+      // fetch them server-side and append as inlineData so Gemini sees all images in one call.
+      const externalUrls = Array.isArray(body?.imageUrls) ? body.imageUrls : [];
+      let fetchedBytesTotal = 0;
+      if (externalUrls.length > 0) {
+        console.log("🧩 imageUrls provided by client; server will fetch and embed as inlineData", {
+          count: externalUrls.length,
+        });
+
+        if (!requestPayload.contents?.[0]) {
+          requestPayload.contents = [{ parts: [] }];
+        } else if (!Array.isArray(requestPayload.contents[0].parts)) {
+          requestPayload.contents[0].parts = [];
+        }
+        const partsArray = requestPayload.contents[0].parts;
+
+        for (let i = 0; i < externalUrls.length; i++) {
+          const { mimeType, data, rawBytes } = await fetchUrlAsInlineData(externalUrls[i], i + 1);
+          fetchedBytesTotal += rawBytes;
+          partsArray.push({ inlineData: { mimeType, data } });
+        }
+
+        console.log("🧾 Embedded images from URLs", {
+          count: externalUrls.length,
+          fetchedBytesTotal,
+          fetchedMB: +(fetchedBytesTotal / (1024 * 1024)).toFixed(2),
+        });
+      }
+
+      // Detailed Gemini request observability (post-augmentation)
       const parts = requestPayload?.contents?.[0]?.parts || [];
       const textPart = parts.find((p) => typeof p?.text === "string")?.text || "";
       const imageParts = parts.filter((p) => !!p?.inlineData);
+      const totalInlineBase64Chars = imageParts.reduce((acc, p) => acc + (p?.inlineData?.data?.length || 0), 0);
+      const totalInlineBytes = ESTIMATE_BYTES_FROM_BASE64(totalInlineBase64Chars);
+
       console.log("📊 Gemini request details:", {
         endpoint,
         modelName,
         hasText: !!textPart,
         imageParts: imageParts.length,
-        promptPreview: textPart?.substring(0, 200) + "...",
+        inlineBytesApprox: totalInlineBytes,
+        inlineMB: +(totalInlineBytes / (1024 * 1024)).toFixed(2),
+        promptPreview: (textPart?.substring(0, 200) || "") + "...",
       });
+
+      if (totalInlineBytes > INLINE_BYTES_SOFT_WARN) {
+        console.warn("⚠️ Large inlineData payload detected:", {
+          inlineBytesApprox: totalInlineBytes,
+          warnThreshold: INLINE_BYTES_SOFT_WARN,
+          advisory: "Client should downsize images further; mobile/edge may reject > ~4MB total JSON.",
+        });
+      }
 
       const result = await model.generateContent(requestPayload);
       const resp = result?.response;
@@ -100,6 +224,7 @@ export default async function handler(req, res) {
       console.log("📝 Gemini completion preview:", assistantText?.substring(0, 200) || "no text");
 
       const geminiShaped = {
+        provider: "gemini",
         candidates: [
           {
             content: {
@@ -165,53 +290,40 @@ export default async function handler(req, res) {
       }
 
       // Extract prompt and images from Gemini-style request
-      const parts = body?.contents?.[0]?.parts || [];
-      const textPart = parts.find((p) => typeof p?.text === "string")?.text || "";
-      const imageParts = parts
+      const partsBase = body?.contents?.[0]?.parts || [];
+      const textPart = partsBase.find((p) => typeof p?.text === "string")?.text || "";
+      const imagePartsInline = partsBase
         .filter((p) => !!p?.inlineData)
         .map((p) => ({
           mimeType: p.inlineData.mimeType,
           data: p.inlineData.data, // base64 without prefix
         }));
 
+      const externalUrls = Array.isArray(body?.imageUrls) ? body.imageUrls : [];
+
       // Prepare OpenAI Chat Completions payload (supports multimodal via image_url)
-      // We intentionally retain the "gemini" endpoint path so the frontend does not change.
       const openAiMessages = [];
+      const content = [];
 
-      if (imageParts.length > 0) {
-        // Multimodal message: text + images
-        const content = [];
+      if (textPart) {
+        content.push({ type: "text", text: textPart });
+      }
 
-        if (textPart) {
-          content.push({ type: "text", text: textPart });
-        }
+      // Inline base64 → data: URL
+      for (const img of imagePartsInline) {
+        const url = `data:${img.mimeType};base64,${img.data}`;
+        content.push({ type: "image_url", image_url: { url } });
+      }
 
-        // Convert inlineData to data: URL that OpenAI accepts in image_url
-        for (const img of imageParts) {
-          const url = `data:${img.mimeType};base64,${img.data}`;
-          content.push({
-            type: "image_url",
-            image_url: { url },
-          });
-        }
+      // External URLs can be passed directly as image_url to OpenAI (when supported by model)
+      for (const url of externalUrls) {
+        content.push({ type: "image_url", image_url: { url } });
+      }
 
-        openAiMessages.push({
-          role: "user",
-          content,
-        });
-
-        console.log("📸 Photo selection request details:", {
-          totalParts: parts.length,
-          textPartPresent: !!textPart,
-          imageParts: imageParts.length,
-          promptPreview: textPart?.substring(0, 200) + "...",
-        });
+      if (content.length > 0) {
+        openAiMessages.push({ role: "user", content });
       } else {
-        // Text-only message
-        openAiMessages.push({
-          role: "user",
-          content: textPart,
-        });
+        openAiMessages.push({ role: "user", content: textPart });
       }
 
       // Map generation config
@@ -222,37 +334,61 @@ export default async function handler(req, res) {
       // gpt-5-mini only supports default temperature. Omit unless exactly 1.
       const temperatureParam = rawTemperature === 1 ? 1 : undefined;
 
-      // Map Gemini maxOutputTokens to OpenAI Chat Completions "max_completion_tokens"
-      // Clamp to a safe upper bound to avoid model limit errors.
-      const rawMaxCompletionTokens =
+      const model = process.env.OPENAI_MODEL || "gpt-5-mini";
+
+      // Resolve tokens field deterministically based on model family (no trial-and-error)
+      const rawMaxOutputTokens =
         typeof body?.generationConfig?.maxOutputTokens === "number"
           ? body.generationConfig.maxOutputTokens
           : undefined;
-      const max_completion_tokens =
-        typeof rawMaxCompletionTokens === "number"
-          ? Math.min(rawMaxCompletionTokens, 4096)
+      const maxTokensValue =
+        typeof rawMaxOutputTokens === "number"
+          ? Math.min(rawMaxOutputTokens, 4096)
           : undefined;
 
-      const model = process.env.OPENAI_MODEL || "gpt-5-mini";
+      // Optional explicit override: OPENAI_TOKENS_FIELD=max_tokens|max_completion_tokens
+      const explicitTokensField = String(process.env.OPENAI_TOKENS_FIELD || "").trim();
+      let tokensField;
+      if (explicitTokensField === "max_tokens" || explicitTokensField === "max_completion_tokens") {
+        tokensField = explicitTokensField;
+      } else if (String(process.env.OPENAI_USE_MAX_TOKENS || "").toLowerCase() === "1") {
+        tokensField = "max_tokens";
+      } else {
+        const m = String(model).toLowerCase();
+        // Newer OpenAI models require 'max_completion_tokens' on Chat Completions:
+        // gpt-4o*, gpt-4.1*, gpt-5*, o3*, o4*
+        const needsCompletionField =
+          m.startsWith("gpt-4o") ||
+          m.startsWith("gpt-4.1") ||
+          m.startsWith("gpt-5") ||
+          m.startsWith("o3") ||
+          m.startsWith("o4") ||
+          m.includes("4o-") ||
+          m.includes("4.1-");
+        tokensField = needsCompletionField ? "max_completion_tokens" : "max_tokens";
+      }
       const openAiPayload = {
         model,
         messages: openAiMessages,
         ...(temperatureParam !== undefined ? { temperature: temperatureParam } : {}),
-        ...(max_completion_tokens !== undefined ? { max_completion_tokens } : {}),
       };
+      if (maxTokensValue !== undefined) {
+        openAiPayload[tokensField] = maxTokensValue;
+      }
 
       // Log size and structure
       const requestBody = JSON.stringify(openAiPayload);
       console.log("📊 OpenAI request details:", {
         endpoint: "chat.completions",
         requestSizeKB: Math.round(requestBody.length / 1024),
-        hasImages: imageParts.length > 0,
+        hasImages: imagePartsInline.length + externalUrls.length > 0,
         hasText: !!textPart,
         temperature: temperatureParam,
-        max_completion_tokens,
+        tokensField,
+        tokensValue: maxTokensValue,
       });
 
-      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      let response = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${API_KEY}`,
@@ -263,13 +399,15 @@ export default async function handler(req, res) {
 
       console.log("📡 OpenAI Response status:", response.status, response.statusText);
 
-      const data = await response.json();
+      let data = await response.json();
 
       if (!response.ok) {
         console.error("❌ OpenAI API error:", {
           status: response.status,
           statusText: response.statusText,
           error: data,
+          model,
+          tokensField,
         });
         return res.status(response.status).json({
           error: data.error?.message || data.message || "OpenAI request failed",
@@ -289,6 +427,7 @@ export default async function handler(req, res) {
 
       // Map to Gemini-shaped response so frontend remains unchanged
       const geminiShaped = {
+        provider: "openai",
         candidates: [
           {
             content: {

@@ -1,7 +1,5 @@
 
 
-
-
 import React, { useState, useCallback } from 'react';
 import { AppStep, QuestionnaireAnswers, UploadedPhoto, GeneratedProfile, SelectedPhoto, RefinementSettings } from './types';
 import { generateBioFromAnswers, selectBestPhotos, refineBioWithChatFeedback } from './services/geminiService';
@@ -98,13 +96,25 @@ const App: React.FC = () => {
         setIsBioLoading(true);
         setError(null);
         try {
-            const newBio = await generateBioFromAnswers(currentAnswers, undefined, refinementSettings, generatedProfile.bio);
-            console.log("--- Refined Bio received ---", newBio);
+            const genResp = await generateBioFromAnswers(
+              currentAnswers,
+              undefined,
+              refinementSettings,
+              generatedProfile.bio,
+              generatedProfile.provider
+            );
+            console.log("--- Refined Bio received ---", genResp);
             
             setGeneratedProfile(prev => {
                 if (!prev) return null; // Should not happen in this flow
-                // Keep existing photos, only update the bio
-                return { ...prev, bio: newBio, selectedPhotos: prev.selectedPhotos };
+                // Keep existing photos, update the bio and persist provider/model info
+                return {
+                  ...prev,
+                  bio: genResp.text,
+                  selectedPhotos: prev.selectedPhotos,
+                  provider: genResp.provider ?? prev.provider,
+                  modelVersion: genResp.modelVersion ?? prev.modelVersion
+                };
             });
             setCurrentStep('finalResults');
 
@@ -200,15 +210,16 @@ const App: React.FC = () => {
                 // Display comprehensive error message
                 setError(`❌ Photo Analysis Failed
                 
-🔍 Error Details: ${detailedError}
+ 🔍 Error Details: ${detailedError}
 
-📸 Troubleshooting Tips:
-• Try uploading different photos (JPEG/PNG work best)
-• Ensure photos are clear and well-lit
-• Check that faces are visible in the photos
-• Try reducing the number of photos
+ 📸 Troubleshooting Tips:
+ • Try uploading different photos (JPEG/PNG work best)
+ • If selecting from Google Photos, save the photo to your device first, then upload
+ • Ensure photos are clear and well-lit
+ • Check that faces are visible in the photos
+ • Try reducing the number of photos
 
-🔧 Technical Info: Check browser console for detailed logs`);
+ 🔧 Technical Info: Check browser console for detailed logs`);
                 setCurrentStep('photoUpload');
                 return;
             }
@@ -249,21 +260,23 @@ const App: React.FC = () => {
         try {
           setLoadingMessage("Crafting your bio...");
           // No refinement settings for initial generation
-          let generatedBioText = await withTimeout(
+          const genResp = await withTimeout(
             generateBioFromAnswers(currentAnswers, undefined, undefined),
             45000,
             'Bio generation'
           );
           console.log("--- Step 3: Bio received from service ---");
-          console.log("Generated Bio Text:", generatedBioText);
+          console.log("Generated Bio Text:", genResp);
           
-          newBio = generatedBioText || "Could not generate a bio based on the answers. Please try again.";
+          newBio = genResp.text || "Could not generate a bio based on the answers. Please try again.";
           
           const newProfile: GeneratedProfile = {
             bio: newBio,
             selectedPhotos: finalSelectedPhotosForMockup,
             userName: currentAnswers.q0_name as string || "User",
             userAge: currentAnswers.q0_age as string || undefined,
+            provider: genResp.provider,
+            modelVersion: genResp.modelVersion,
           };
 
           console.log("--- Step 4: Setting generatedProfile state ---", newProfile);
@@ -309,6 +322,21 @@ const App: React.FC = () => {
 
   const handlePhotosSubmitted = useCallback(async (photos: UploadedPhoto[]) => {
     console.log("--- Step 1b: Photos submitted ---", photos);
+    // Additional structured logging for mobile debugging and payload budgeting
+    try {
+      const filesMeta = photos.map(p => ({
+        id: p.id,
+        name: p.file?.name,
+        type: p.file?.type,
+        sizeBytes: p.file?.size
+      }));
+      const totalBytes = filesMeta.reduce((s, x) => s + (typeof x.sizeBytes === 'number' ? x.sizeBytes : 0), 0);
+      console.log("[Photos] Submitted meta:", filesMeta);
+      console.log("[Photos] Count:", photos.length, "Total size:", Math.round(totalBytes / 1024), "KB", `(${+(totalBytes / (1024 * 1024)).toFixed(2)} MB)`);
+    } catch (e) {
+      console.warn("[Photos] Failed to log photo meta:", e);
+    }
+
     setUploadedPhotos(photos);
     await generateProfileData(essentialAnswers, false, photos);
   }, [essentialAnswers]);
@@ -422,10 +450,15 @@ const App: React.FC = () => {
     setError(null);
 
     try {
-      const newBio = await generateBioFromAnswers(essentialAnswers, tone);
+      const genResp = await generateBioFromAnswers(essentialAnswers, tone, undefined, undefined, generatedProfile.provider);
       setGeneratedProfile(prev => {
         if (!prev) return null;
-        return { ...prev, bio: newBio };
+        return {
+          ...prev,
+          bio: genResp.text,
+          provider: genResp.provider ?? prev.provider,
+          modelVersion: genResp.modelVersion ?? prev.modelVersion
+        };
       });
     } catch (err) {
       console.error("Bio regeneration failed:", err);
@@ -439,13 +472,39 @@ const App: React.FC = () => {
   const handleChatBioRefine = useCallback(async (feedback: string) => {
     if (chatRefinementCount >= 2 || !generatedProfile || isBioLoading) return;
 
+    console.log('--- Step 7: handleChatBioRefine called ---');
+    console.log('Feedback:', feedback);
+    console.log('Current profile:', generatedProfile);
+
     setIsBioLoading(true);
     setError(null);
     try {
-      const newBio = await refineBioWithChatFeedback(generatedProfile.bio, feedback, currentRefinementSettings);
+      const current = generatedProfile.bio || '';
+      const provider = generatedProfile.provider;
+      console.log('Refining with provider:', provider);
+
+      // Force the model to produce a noticeably different bio reflecting the user's feedback
+      let newBio = await refineBioWithChatFeedback(current, feedback, currentRefinementSettings, true, provider);
+
+      // If the model returns an identical result (rare), make a second attempt with stronger instruction
+      const normalize = (s: string) => s.replace(/\s+/g, ' ').trim();
+      if (normalize(newBio) === normalize(current)) {
+        console.warn('Bio was identical, retrying with stronger prompt...');
+        newBio = await refineBioWithChatFeedback(
+          current,
+          `${feedback}\n(Please rephrase significantly; ensure noticeable wording changes while preserving meaning.)`,
+          currentRefinementSettings,
+          true,
+          provider
+        );
+      }
+      
+      console.log('--- Step 8: New bio received ---', newBio);
       setGeneratedProfile(prev => {
         if (!prev) return null;
-        return { ...prev, bio: newBio };
+        const updatedProfile = { ...prev, bio: newBio };
+        console.log('Updating profile state:', updatedProfile);
+        return updatedProfile;
       });
       setChatRefinementCount(prev => prev + 1);
     } catch (err) {
@@ -527,7 +586,7 @@ const App: React.FC = () => {
             />
           );
         }
-        if (!error) setError("Failed to display profile. Data is missing. Please try starting over.");
+        if (!error) setError("Failed to display profile. Data is missing. Please try again.");
         return <Alert message={error || "Profile data is unavailable. Please start over."} type="error" onClose={handleReset}/>;
       
       default:

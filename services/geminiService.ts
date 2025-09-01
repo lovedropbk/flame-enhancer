@@ -1,42 +1,58 @@
-import { GEMINI_TEXT_MODEL, RECOMMENDED_BIO_LENGTH } from '../constants';
 import { QuestionnaireAnswers, RefinementSettings } from "../types";
+import { uploadForAnalysis } from "./cloudinaryService";
 
 // Secure API call function that doesn't expose API key
-async function callGeminiAPI(endpoint: string, body: any, timeoutMs: number = 60000) {
+async function callGeminiAPI(endpoint: string, body: any, timeoutMs: number = 60000, provider?: 'gemini' | 'openai') {
   console.log('🔄 Making API call to:', endpoint);
   console.log('📤 Request body structure:', {
     contents: body.contents?.length || 0,
     safetySettings: body.safetySettings?.length || 0,
-    generationConfig: !!body.generationConfig
+    generationConfig: !!body.generationConfig,
+    imageUrls: Array.isArray(body.imageUrls) ? body.imageUrls.length : 0
   });
 
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    const payload: any = { endpoint, body };
+    if (provider) payload.provider = provider;
+
+    // Log JSON payload size in bytes (pre-flight)
+    const payloadString = JSON.stringify(payload);
+    console.log('📦 Outbound /api/gemini JSON payload size (bytes):', payloadString.length);
+
     const response = await fetch('/api/gemini', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ endpoint, body }),
+      body: payloadString,
       signal: controller.signal
     });
 
     console.log('📡 API Response status:', response.status, response.statusText);
 
     if (!response.ok) {
-      const errorText = await response.text();
-      console.error('❌ API Error Response:', errorText);
+        const errorText = await response.text();
+        console.error('❌ API Error Response:', errorText);
 
-      let errorData;
-      try {
-        errorData = JSON.parse(errorText);
-      } catch {
-        errorData = { error: `HTTP ${response.status}: ${errorText}` };
-      }
+        let errorData;
+        try {
+            errorData = JSON.parse(errorText);
+        } catch {
+            // If parsing fails, use a structured error format
+            errorData = {
+                error: `HTTP ${response.status}: ${response.statusText}`,
+                details: errorText.substring(0, 200) + (errorText.length > 200 ? '...' : '')
+            };
+        }
 
-      throw new Error(`API Error (${response.status}): ${errorData.error || errorText}`);
+        const errorMessage = errorData.error || `API request failed with status ${response.status}`;
+        const finalError = new Error(errorMessage);
+        (finalError as any).status = response.status;
+        (finalError as any).details = errorData.details || errorText;
+        throw finalError;
     }
 
     const result = await response.json();
@@ -67,6 +83,12 @@ const DEFAULT_SAFETY_SETTINGS = [
   { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
   { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
 ];
+
+// Payload budgeting (client-side) to avoid 413 at the edge
+// We stay comfortably under Vercel's ~4.5MB limit to account for headers/overhead.
+const MAX_GEMINI_JSON_BYTES = 3_800_000; // 3.8 MB safety cap
+const IMAGE_PART_OVERHEAD_BYTES = 512;    // rough JSON overhead per inline image part
+const PROMPT_OVERHEAD_FLOOR_BYTES = 1024; // minimal structure overhead
 
 const parseJsonFromGeminiResponse = (responseText: string | undefined): any => {
   if (typeof responseText !== 'string') {
@@ -132,115 +154,282 @@ const getSophisticationString = (value: number | null): string => {
   return "The target partner has simple interests, is impressed by luxury/status, and prefers direct, simple English. Use braggy but simple language (e.g., 'My passport is getting full'). Think 'Insta-Model'.";
 };
 
-// Optimized image conversion for AI photo selection - balances quality vs payload size
-const convertImageToJPEG = (file: File): Promise<{ base64Data: string; mimeType: string }> => {
-  return new Promise((resolve, reject) => {
-    console.log('🖼️ Converting image for AI analysis:', file.name, 'Original size:', Math.round(file.size / 1024) + 'KB');
-
-    // Guard: browsers can't decode HEIC/HEIF via <img>/<canvas>
-    const isHeic = /heic|heif/i.test(file.type) || /\.(heic|heif)$/i.test(file.name || '');
-    if (isHeic) {
-      return reject(new Error(`This browser cannot decode HEIC/HEIF images for analysis. Please use JPEG/PNG/WebP, take a screenshot, or save as JPEG on the device.`));
-    }
-
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    const img = new Image();
-
-    let objectUrl: string | null = null;
-    let timeoutId: number | null = null;
-
-    const cleanup = () => {
-      if (timeoutId !== null) {
-        window.clearTimeout(timeoutId);
-        timeoutId = null;
-      }
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-        objectUrl = null;
-      }
-    };
-
-    img.onload = () => {
-      console.log('📐 Original dimensions:', img.width, 'x', img.height);
-
-      const maxSize = 768;
-      let { width, height } = img;
-
-      if (width > maxSize || height > maxSize) {
-        if (width > height) {
-          height = (height * maxSize) / width;
-          width = maxSize;
-        } else {
-          width = (width * maxSize) / height;
-          height = maxSize;
-        }
-      }
-
-      canvas.width = width;
-      canvas.height = height;
-
-      console.log('📐 AI analysis dimensions:', width, 'x', height);
-
-      try {
-        ctx?.drawImage(img, 0, 0, width, height);
-
-        // Start with higher quality for better attractiveness assessment
-        let quality = 0.85;
-        let dataUrl = canvas.toDataURL('image/jpeg', quality);
-        let base64Data = dataUrl.split(',')[1];
-
-        // Target ~300KB per image (400000 base64 chars ≈ 300KB)
-        while (base64Data.length > 400000 && quality > 0.5) {
-          quality -= 0.1;
-          dataUrl = canvas.toDataURL('image/jpeg', quality);
-          base64Data = dataUrl.split(',')[1];
-        }
-
-        console.log('✅ AI analysis image ready:', {
-          quality: Math.round(quality * 100) + '%',
-          sizeKB: Math.round(base64Data.length * 0.75 / 1024),
-          compressionRatio: Math.round((file.size / (base64Data.length * 0.75)) * 100) / 100 + 'x'
-        });
-
-        cleanup();
-        resolve({
-          base64Data,
-          mimeType: 'image/jpeg'
-        });
-      } catch (error) {
-        console.error('❌ AI analysis conversion failed:', error);
-        cleanup();
-        reject(new Error(`Failed to convert image for AI analysis: ${error}`));
-      }
-    };
-
-    img.onerror = (error) => {
-      console.error('❌ Image load failed:', error);
-      cleanup();
-      reject(new Error(`Failed to load image: ${file.name}`));
-    };
-
-    // Watchdog to avoid indefinite hang if onload/onerror never fire
-    timeoutId = window.setTimeout(() => {
-      console.error('⏰ Image decode timed out:', file.name);
-      cleanup();
-      reject(new Error(`Image decode timed out for ${file.name}. If selected from Google Photos, save the photo to your device first and retry.`));
-    }, 20000);
-
-    objectUrl = URL.createObjectURL(file);
-    img.src = objectUrl;
-  });
+// Encoding options for adaptive downsizing
+type EncodeOptions = {
+  targetBytes?: number;     // target final JPEG bytes for this image
+  maxDimension?: number;    // initial max width/height
+  minDimension?: number;    // floor for width/height when stepping down
+  initialQuality?: number;  // starting JPEG quality (0..1)
+  minQuality?: number;      // floor for JPEG quality
+  qualityStep?: number;     // decrement per iteration
+  dimensionStep?: number;   // scale factor for dimension down-step
 };
 
+// Optimized image conversion for AI photo selection - balances quality vs payload size
+// More robust on Android/Google Photos: multiple decode strategies, header sniffing for disguised HEIC, and clearer errors.
+// Now supports adaptive downsizing within a per-image byte budget.
+const convertImageToJPEG = (file: File, options: EncodeOptions = {}): Promise<{ base64Data: string; mimeType: string }> => {
+  const {
+    targetBytes = 250 * 1024,   // default ~250KB
+    maxDimension = 768,
+    minDimension = 384,
+    initialQuality = 0.85,
+    minQuality = 0.35,
+    qualityStep = 0.07,
+    dimensionStep = 0.85,
+  } = options;
 
+  return new Promise((resolve, reject) => {
+    console.log('🖼️ Converting image for AI analysis:', file.name, 'Original size:', Math.round(file.size / 1024) + 'KB', {
+      targetBytes,
+      maxDimension,
+      minDimension,
+      initialQuality,
+      minQuality,
+    });
+
+    // Helpers
+    const promiseWithTimeout = <T,>(p: Promise<T>, ms: number, label: string): Promise<T> => {
+      return new Promise((res, rej) => {
+        const id = window.setTimeout(() => rej(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+        p.then(v => { window.clearTimeout(id); res(v); }).catch(e => { window.clearTimeout(id); rej(e); });
+      });
+    };
+
+    const sniffIsoBrands = async (f: File): Promise<{ isHeicFamily: boolean; isAvif: boolean; brand?: string }> => {
+      try {
+        const buf = new Uint8Array(await f.slice(0, 32).arrayBuffer());
+        // Look for 'ftyp' + brand (ISO Base Media File Format)
+        const asAscii = Array.from(buf).map(c => String.fromCharCode(c)).join('');
+        const brands = ['heic','heif','hevc','mif1','msf1','avif','avis'];
+        let detected: string | undefined;
+        if (asAscii.includes('ftyp')) {
+          for (const b of brands) {
+            if (asAscii.includes('ftyp' + b)) { detected = b; break; }
+          }
+        }
+        const isHeicFamily = !!detected && ['heic','heif','hevc','mif1','msf1'].includes(detected);
+        const isAvif = detected === 'avif' || detected === 'avis';
+        return { isHeicFamily, isAvif, brand: detected };
+      } catch {
+        return { isHeicFamily: false, isAvif: false };
+      }
+    };
+
+    const blobToDataURL = (blob: Blob, timeoutMs: number = 45000): Promise<string> => {
+      return new Promise((res, rej) => {
+        const reader = new FileReader();
+        let to: number | null = window.setTimeout(() => {
+          to && window.clearTimeout(to);
+          rej(new Error('FileReader.readAsDataURL timed out'));
+        }, timeoutMs);
+        reader.onerror = () => {
+          to && window.clearTimeout(to);
+          rej(reader.error || new Error('Unknown FileReader error'));
+        };
+        reader.onload = () => {
+          to && window.clearTimeout(to);
+          res(String(reader.result));
+        };
+        reader.readAsDataURL(blob);
+      });
+    };
+
+    const loadImageElement = (src: string, timeoutMs: number = 30000): Promise<HTMLImageElement> => {
+      return new Promise((res, rej) => {
+        const img = new Image();
+        img.decoding = 'async';
+        img.crossOrigin = 'anonymous';
+        let to: number | null = window.setTimeout(() => {
+          to && window.clearTimeout(to);
+          rej(new Error('Image decode timed out'));
+        }, timeoutMs);
+
+        const done = () => { to && window.clearTimeout(to); res(img); };
+        img.onload = () => {
+          if ('decode' in img && typeof (img as any).decode === 'function') {
+            (img as any).decode().then(done).catch(() => done());
+          } else {
+            done();
+          }
+        };
+        img.onerror = () => {
+          to && window.clearTimeout(to);
+          rej(new Error('HTMLImageElement onerror'));
+        };
+        img.src = src;
+      });
+    };
+
+    const computeTargetDims = (w: number, h: number, max = 768): { w: number; h: number } => {
+      if (w <= max && h <= max) return { w, h };
+      if (w >= h) {
+        const nh = Math.round((h * max) / w);
+        return { w: max, h: nh };
+      } else {
+        const nw = Math.round((w * max) / h);
+        return { w: nw, h: max };
+      }
+    };
+
+    // Iteratively encode by reducing quality and dimensions until the targetBytes is met
+    const adaptiveEncode = (imgW: number, imgH: number, imageDraw: (w: number, h: number) => HTMLCanvasElement) => {
+      let currentMax = maxDimension;
+      let finalBase64 = '';
+      let finalQuality = initialQuality;
+      let finalDims = { w: 0, h: 0 };
+
+      outer: while (true) {
+        const dims = computeTargetDims(imgW, imgH, currentMax);
+        let quality = initialQuality;
+
+        // Prepare canvas for these dims
+        let canvas = imageDraw(dims.w, dims.h);
+
+        while (true) {
+          const dataUrl = canvas.toDataURL('image/jpeg', quality);
+          const base64Data = dataUrl.split(',')[1];
+          const sizeBytes = Math.floor(base64Data.length * 0.75);
+
+          // Log attempt
+          console.log('🧪 JPEG attempt:', {
+            dims: `${dims.w}x${dims.h}`,
+            quality,
+            sizeKB: Math.round(sizeBytes / 1024),
+            targetKB: Math.round(targetBytes / 1024),
+          });
+
+          if (sizeBytes <= targetBytes || quality <= minQuality + 1e-6) {
+            // Accept this result and see if within budget; if not within budget and we can reduce dims, do that next
+            finalBase64 = base64Data;
+            finalQuality = quality;
+            finalDims = dims;
+            break;
+          }
+
+          quality = Math.max(minQuality, +(quality - 0.07).toFixed(2));
+          // Continue inner loop with reduced quality
+        }
+
+        const finalBytes = Math.floor(finalBase64.length * 0.75);
+        if (finalBytes <= targetBytes || currentMax <= minDimension) {
+          // Either within target or reached dimension floor
+          console.log('✅ AI analysis image ready:', {
+            finalDims: `${finalDims.w}x${finalDims.h}`,
+            quality: Math.round(finalQuality * 100) + '%',
+            sizeKB: Math.round(finalBytes / 1024),
+            compressionRatio: Math.round((file.size / finalBytes) * 100) / 100 + 'x'
+          });
+          return { base64Data: finalBase64, mimeType: 'image/jpeg' as const };
+        }
+
+        // Otherwise decrease dimensions and try again
+        const nextDim = Math.floor(currentMax * 0.85);
+        const nextMax = Math.max(minDimension, nextDim);
+        if (nextMax === currentMax) {
+          // Can't reduce further
+          console.log('🟡 Reached min dimension; accepting last encode at', finalBytes, 'bytes');
+          return { base64Data: finalBase64, mimeType: 'image/jpeg' as const };
+        }
+        console.log('↘️ Reducing dimensions for next encode pass:', { from: currentMax, to: nextMax });
+        currentMax = nextMax;
+      }
+    };
+
+    // Run async flow
+    (async () => {
+      // 1) Header sniff for disguised HEIC coming from Google Photos / Pixel (can be named .jpg but still HEIC)
+      const sniff = await sniffIsoBrands(file);
+      const explicitHeic =
+        /heic|heif/i.test(file.type) || /\.(heic|heif)$/i.test(file.name || '');
+      if (explicitHeic || sniff.isHeicFamily) {
+        throw new Error(
+          `This image appears to be HEIC/HEIF (${sniff.brand || 'heic'}). Android/Chrome cannot draw HEIC to canvas. Please use JPEG/PNG/WebP, take a screenshot, or "Save as JPEG" in Google Photos before uploading.`
+        );
+      }
+
+      // 2) Preferred fast path: createImageBitmap
+      try {
+        if (typeof createImageBitmap === 'function') {
+          const bitmap = await promiseWithTimeout(createImageBitmap(file), 25000, 'createImageBitmap');
+          try {
+            const out = adaptiveEncode(bitmap.width, bitmap.height, (w, h) => {
+              const canvas = document.createElement('canvas');
+              canvas.width = w;
+              canvas.height = h;
+              const ctx = canvas.getContext('2d');
+              ctx?.drawImage(bitmap, 0, 0, w, h);
+              return canvas;
+            });
+            bitmap.close?.();
+            resolve(out);
+            return;
+          } finally {
+            try { (bitmap as ImageBitmap).close?.(); } catch { /* noop */ }
+          }
+        }
+      } catch (e) {
+        console.warn('⚠️ createImageBitmap path failed, falling back to HTMLImageElement:', e);
+      }
+
+      // 3) Fallback A: Data URL
+      try {
+        const dataUrl = await blobToDataURL(file, 45000);
+        const img = await loadImageElement(dataUrl, 30000);
+        const out = adaptiveEncode(img.naturalWidth || img.width, img.naturalHeight || img.height, (w, h) => {
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx?.drawImage(img, 0, 0, w, h);
+          return canvas;
+        });
+        resolve(out);
+        return;
+      } catch (e) {
+        console.warn('⚠️ DataURL decode path failed, trying blob:objectURL path:', e);
+      }
+
+      // 4) Fallback B: blob: object URL
+      let objectUrl: string | null = null;
+      try {
+        objectUrl = URL.createObjectURL(file);
+        const img = await loadImageElement(objectUrl, 30000);
+        const out = adaptiveEncode(img.naturalWidth || img.width, img.naturalHeight || img.height, (w, h) => {
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx?.drawImage(img, 0, 0, w, h);
+          return canvas;
+        });
+        resolve(out);
+        return;
+      } finally {
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+      }
+    })().catch((err: any) => {
+      console.error('❌ Image conversion failed:', err);
+      // Normalize common Android/Google Photos failure into actionable guidance
+      const base = `Failed to process image "${file.name}": ${err?.message || err}`;
+      let hint = '';
+      if (/HEIC|HEIF/i.test(String(err?.message))) {
+        hint = '\nHint: On Google Pixel/Photos, export or save the photo as JPEG/PNG first, or take a screenshot.';
+      } else if (/timed out|decode|HTMLImageElement onerror/i.test(String(err?.message))) {
+        hint = '\nHint: If selected from Google Photos cloud, use "Download/Save to device" then re-upload.';
+      }
+      reject(new Error(base + hint));
+    });
+  });
+};
 
 export const generateBioFromAnswers = async (
   answers: QuestionnaireAnswers,
   tone?: string,
   refinementSettings?: RefinementSettings,
-  currentBio?: string
-): Promise<string> => {
+  currentBio?: string,
+  providerOverride?: 'gemini' | 'openai'
+): Promise<{ text: string; provider?: 'gemini' | 'openai'; modelVersion?: string }> => {
 
   let promptDetails = "Here's what the user shared about themselves:\n";
   if (answers.q0_name) promptDetails += `- Their Name: ${answers.q0_name}\n`;
@@ -332,11 +521,17 @@ Now, write a bio that gets swipes. Make it pop.`;
   };
 
   try {
-    const response = await callGeminiAPI(`models/${GEMINI_TEXT_MODEL}:generateContent`, requestBody, 45000);
+    // Let the server decide the model from environment (GEMINI_TEXT_MODEL).
+    // Passing a non-matching endpoint avoids client-embedded model strings.
+    const response = await callGeminiAPI('models/:generateContent', requestBody, 45000, providerOverride);
 
     if (response.candidates && response.candidates[0] && response.candidates[0].content) {
-      const text = response.candidates[0].content.parts[0]?.text;
-      return text || "Unable to generate bio. Please try again.";
+      const text = response.candidates[0].content.parts[0]?.text || "Unable to generate bio. Please try again.";
+      return {
+        text,
+        provider: response.provider,
+        modelVersion: response.modelVersion
+      };
     }
 
     throw new Error("Invalid response format from Gemini API");
@@ -353,48 +548,12 @@ export const selectBestPhotos = async (
   targetGender?: string
 ): Promise<Array<{ id: string, reason: string }>> => {
   console.log('🔍 Starting photo analysis for', photos.length, 'photos, selecting', numToSelect);
+  console.log('📊 Photo sizes:', photos.map(p => ({
+    name: p.fileName,
+    sizeMB: (p.file.size / (1024 * 1024)).toFixed(2)
+  })));
 
-  // Convert all images to optimized JPEG format for AI analysis
-  const convertedPhotos: Array<{
-    originalId: string;
-    simpleId: number;
-    base64Data: string;
-    mimeType: string;
-    fileName: string;
-  }> = [];
-  let totalPayloadSize = 0;
-
-  for (let i = 0; i < photos.length; i++) {
-    const photo = photos[i];
-    console.log(`📸 Processing photo ${i + 1}/${photos.length}:`, photo.fileName);
-
-    try {
-      const converted = await convertImageToJPEG(photo.file);
-      const imageSize = converted.base64Data.length * 0.75; // Approximate bytes
-      totalPayloadSize += imageSize;
-
-      convertedPhotos.push({
-        originalId: photo.id,  // Keep original ID for mapping back
-        simpleId: i + 1,       // Simple 1-based index for Gemini
-        ...converted,
-        fileName: photo.fileName
-      });
-
-      console.log(`✅ Photo ${i + 1} processed. Size: ${Math.round(imageSize / 1024)}KB, Total payload: ${Math.round(totalPayloadSize / 1024)}KB`);
-
-      // Check if we're approaching Vercel's 4.5MB limit
-      if (totalPayloadSize > 3500000) { // 3.5MB warning threshold
-        console.warn(`⚠️ Payload size approaching limit: ${Math.round(totalPayloadSize / 1024)}KB`);
-      }
-
-    } catch (error) {
-      console.error(`❌ Failed to convert photo ${photo.fileName}:`, error);
-      throw new Error(`Failed to process image "${photo.fileName}": ${error}`);
-    }
-  }
-
-  console.log(`📊 Total payload size: ${Math.round(totalPayloadSize / 1024)}KB for ${photos.length} photos`);
-
+  // Build prompt first so we can estimate overhead and compute a per-image budget
   const prompt = `You are a world-class dating profile consultant for a ${userGender || 'person'} interested in meeting ${targetGender || 'people'}. Your task is to act as an expert photo selector. You must choose the top photos that make the user look as ATTRACTIVE, confident, and appealing as possible for a dating app, keeping their gender and target audience in mind.
 
 I have uploaded ${photos.length} photos numbered 1 to ${photos.length}.
@@ -417,35 +576,206 @@ IMPORTANT: Return ONLY a valid JSON array with exactly ${numToSelect} objects. E
 Example format:
 [{"id": 1, "reason": "Excellent lighting and genuine smile make you look very attractive."}, {"id": 5, "reason": "This full-body shot shows confidence and a great sense of style."}]`;
 
-  const parts: Array<{ text: string } | { inlineData: { mimeType: string, data: string } }> = [{ text: prompt }];
+  // Compute a rough overhead by stringifying a minimal request with the prompt only
+  const minimalPayload = {
+    contents: [{ parts: [{ text: prompt }] }],
+    safetySettings: DEFAULT_SAFETY_SETTINGS,
+    generationConfig: { temperature: 0.1, maxOutputTokens: 15000 }
+  };
+  const minimalJsonBytes = JSON.stringify(minimalPayload).length + PROMPT_OVERHEAD_FLOOR_BYTES;
+  const n = photos.length;
 
-  // Add converted photos as inline data
-  convertedPhotos.forEach(photo => {
-    parts.push({
-      inlineData: {
-        mimeType: photo.mimeType,
-        data: photo.base64Data
-      }
-    });
+  // More aggressive compression for mobile - reduce target sizes
+  const baseRemaining = Math.max(0, MAX_GEMINI_JSON_BYTES - minimalJsonBytes - (n * IMAGE_PART_OVERHEAD_BYTES));
+  const perImageTarget = Math.max(
+    80 * 1024, // reduced floor to 80KB
+    Math.min(180 * 1024, Math.floor(baseRemaining / Math.max(1, n))) // reduced cap to 180KB
+  );
+
+  // More aggressive initial dimension target based on count
+  const initialMaxDim = n >= 10 ? 480 : n >= 8 ? 560 : 640;
+
+  console.log('🧮 Budgeting:', {
+    MAX_GEMINI_JSON_BYTES,
+    minimalJsonBytes,
+    images: n,
+    perImageTargetKB: Math.round(perImageTarget / 1024),
+    initialMaxDim
   });
 
-  const requestBody = {
-    contents: [{ parts }],
-    safetySettings: DEFAULT_SAFETY_SETTINGS,
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 15000  // MAX TOKENS - no limits for now!
-    }
+  // Decide pipeline: default to Cloudinary URL pipeline for robustness on all devices.
+  const isAndroid = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent || '');
+  const isMobile = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+  const useUrlPipeline = true; // Always prefer server-fetched URL pipeline
+  console.log('🌐 Pipeline selection:', { isAndroid, isMobile, useUrlPipelineDefault: useUrlPipeline });
+
+  type BuildResult = {
+    requestBody: any;
+    jsonBytes: number;
+    idMap: string[]; // simpleId (1-based) -> originalId
   };
+
+  const buildWithInlineData = async (): Promise<BuildResult> => {
+    // Helper to encode all photos under a given per-image target and dimension cap
+    const encodeAllWith = async (targetBytes: number, maxDim: number) => {
+      const converted: Array<{
+        originalId: string;
+        simpleId: number;
+        base64Data: string;
+        mimeType: string;
+        fileName: string;
+      }> = [];
+      let totalPayloadSizeBytes = 0;
+
+      for (let i = 0; i < photos.length; i++) {
+        const photo = photos[i];
+        console.log(`📸 Processing photo ${i + 1}/${photos.length}:`, photo.fileName, { targetBytes, maxDim });
+
+        try {
+          const encoded = await convertImageToJPEG(photo.file, {
+            targetBytes,
+            maxDimension: maxDim,
+            minDimension: 320, // reduced from 384
+            initialQuality: 0.75, // reduced from 0.85
+            minQuality: 0.25, // reduced from 0.35
+          });
+          const imageBytes = Math.floor(encoded.base64Data.length * 0.75);
+          totalPayloadSizeBytes += imageBytes;
+
+          converted.push({
+            originalId: photo.id,
+            simpleId: i + 1,
+            base64Data: encoded.base64Data,
+            mimeType: encoded.mimeType,
+            fileName: photo.fileName
+          });
+
+          console.log(`✅ Photo ${i + 1} processed. Size: ${Math.round(imageBytes / 1024)}KB, Aggregate img bytes: ${Math.round(totalPayloadSizeBytes / 1024)}KB`);
+        } catch (error) {
+          console.error(`❌ Failed to convert photo ${photo.fileName}:`, error);
+          throw new Error(`CONVERT_FAIL: ${String(error)}`);
+        }
+      }
+
+      const parts: Array<{ text: string } | { inlineData: { mimeType: string, data: string } }> = [{ text: prompt }];
+      converted.forEach(p => parts.push({ inlineData: { mimeType: p.mimeType, data: p.base64Data } }));
+
+      const requestBody = {
+        contents: [{ parts }],
+        safetySettings: DEFAULT_SAFETY_SETTINGS,
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 15000
+        }
+      };
+
+      const jsonBytes = JSON.stringify(requestBody).length;
+      console.log('📦 Built Gemini request JSON size (bytes):', jsonBytes, 'target cap:', MAX_GEMINI_JSON_BYTES);
+
+      return { converted, requestBody, jsonBytes };
+    };
+
+    // More aggressive retry logic with up to 4 attempts
+    let attempt = 0;
+    let target = perImageTarget;
+    let dims = initialMaxDim;
+
+    let temp = await encodeAllWith(target, dims);
+    while (temp.jsonBytes > MAX_GEMINI_JSON_BYTES && attempt < 4) {
+      attempt++;
+      // More aggressive reduction: decrease per-image target, step down dimension
+      target = Math.max(60 * 1024, Math.floor(target * 0.7)); // reduced floor to 60KB
+      dims = Math.max(320, Math.floor(dims * 0.75)); // reduced floor to 320px
+      console.warn(`⚠️ JSON payload too large (${temp.jsonBytes} bytes). Attempt ${attempt + 1}/5: perImageTarget=${Math.round(target / 1024)}KB, maxDim=${dims}`);
+      temp = await encodeAllWith(target, dims);
+    }
+
+    if (temp.jsonBytes > MAX_GEMINI_JSON_BYTES) {
+      throw new Error(`OVERSIZE_JSON: ${temp.jsonBytes}`);
+    }
+
+    const idMap = temp.converted.map(c => c.originalId);
+    return { requestBody: temp.requestBody, jsonBytes: temp.jsonBytes, idMap };
+  };
+
+  const buildWithUrlPipeline = async (maxWidth: number = Math.min(initialMaxDim, 640)): Promise<BuildResult> => {
+    console.log('🌐 Using Cloudinary URL pipeline. Uploading for analysis...');
+    console.log('📦 URL Pipeline Config:', { maxWidth, photos: photos.length });
+    const analysisUrls: string[] = [];
+    const idMap: string[] = [];
+    for (let i = 0; i < photos.length; i++) {
+      const p = photos[i];
+      console.log(`☁️ Uploading ${i + 1}/${photos.length} to Cloudinary for analysis:`, {
+        fileName: p.fileName,
+        sizeMB: (p.file.size / (1024 * 1024)).toFixed(2)
+      });
+      try {
+        const { analysis } = await uploadForAnalysis(p.file, maxWidth);
+        console.log(`✅ Upload successful for ${p.fileName}, URL: ${analysis}`);
+        analysisUrls.push(analysis);
+        idMap.push(p.id);
+      } catch (e) {
+        console.error(`❌ Cloudinary analysis upload failed for ${p.fileName}`, e);
+        const errorMsg = e instanceof Error ? e.message : String(e);
+        console.error('🔍 Full error details:', { fileName: p.fileName, error: errorMsg, stack: e instanceof Error ? e.stack : undefined });
+        throw new Error(`Cloudinary analysis upload failed for "${p.fileName}": ${errorMsg}`);
+      }
+    }
+
+    const requestBody = {
+      contents: [{ parts: [{ text: prompt }] }],
+      imageUrls: analysisUrls, // server will fetch and embed inlineData
+      safetySettings: DEFAULT_SAFETY_SETTINGS,
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 15000
+      }
+    };
+
+    const jsonBytes = JSON.stringify(requestBody).length;
+    console.log('📦 Built URL-pipeline Gemini request JSON size (bytes):', jsonBytes, 'urls:', analysisUrls.length);
+
+    return { requestBody, jsonBytes, idMap };
+  };
+
+  let buildResult: BuildResult | null = null;
+
+  // Try URL pipeline first. If it fails because Cloudinary is unconfigured, fallback to inline data.
+  console.log('🚀 Attempting to build request payload...');
+  try {
+    console.log('📤 Trying Cloudinary URL pipeline first...');
+    buildResult = await buildWithUrlPipeline(initialMaxDim);
+    console.log('✅ Successfully built request with URL pipeline');
+  } catch (err) {
+    const msg = String((err as Error)?.message || err);
+    console.error('❌ URL pipeline error:', {
+      message: msg,
+      isCloudinaryUnconfigured: msg.includes('CLOUDINARY_UNCONFIGURED'),
+      fullError: err
+    });
+    
+    if (msg.includes('CLOUDINARY_UNCONFIGURED')) {
+        console.warn('⚠️ Cloudinary is not configured. Falling back to inline data pipeline.');
+        console.log('📤 Attempting inline data pipeline as fallback...');
+        buildResult = await buildWithInlineData();
+        console.log('✅ Successfully built request with inline data pipeline');
+    } else {
+        console.error('💥 URL pipeline failed and no fallback available:', msg);
+        throw new Error(`Photo upload failed: ${msg}`);
+    }
+  }
+
+  if (!buildResult) {
+    throw new Error('Photo analysis preparation failed: no build result.');
+  }
 
   try {
     console.log('🚀 Sending request to Gemini API...');
-    const response = await callGeminiAPI(`models/${GEMINI_TEXT_MODEL}:generateContent`, requestBody, 90000);
+    const response = await callGeminiAPI('models/:generateContent', buildResult.requestBody, 120000);
 
     if (response.candidates && response.candidates[0] && response.candidates[0].content) {
       const text = response.candidates[0].content.parts[0]?.text;
-      console.log('📝 Raw Gemini response text:', text);
-      console.log('📝 Raw response length:', text?.length || 0);
+      console.log('📝 Raw Gemini response text length:', text?.length || 0);
       console.log('📝 Response first 500 chars:', text?.substring(0, 500));
 
       const parsed = parseJsonFromGeminiResponse(text);
@@ -456,27 +786,28 @@ Example format:
 
         // Map simple IDs (1-based) back to original photo IDs
         const mappedResults = parsed.map((selection: any) => {
-          const convertedPhoto = convertedPhotos.find(p => p.simpleId === selection.id);
-          if (!convertedPhoto) {
-            console.error(`❌ Could not find photo with simple ID ${selection.id}`);
+          const idx = Number(selection.id);
+          if (!Number.isFinite(idx) || idx < 1 || idx > buildResult!.idMap.length) {
+            console.error(`❌ Invalid selection id in response:`, selection);
             return null;
           }
+          const originalId = buildResult!.idMap[idx - 1];
           return {
-            id: convertedPhoto.originalId,  // Return original ID
+            id: originalId,
             reason: selection.reason
           };
-        }).filter((item): item is { id: string; reason: string } => item !== null);
+        }).filter((item): item is { id: string; reason: string } => !!item);
 
         console.log('✅ Mapped results:', mappedResults);
         return mappedResults;
       } else {
         console.error('❌ Invalid parsed response:', {
           isArray: Array.isArray(parsed),
-          length: parsed?.length,
+          length: (parsed as any)?.length,
           expected: numToSelect,
           actual: parsed
         });
-        throw new Error(`Expected ${numToSelect} photo selections, got ${parsed?.length || 0}`);
+        throw new Error(`Expected ${numToSelect} photo selections, got ${Array.isArray(parsed) ? parsed.length : 0}`);
       }
     } else {
       console.error('❌ Invalid API response structure:', {
@@ -487,32 +818,41 @@ Example format:
       });
       throw new Error("Invalid response format from Gemini API");
     }
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const errorStack = error instanceof Error ? error.stack : undefined;
-    const errorName = error instanceof Error ? error.name : 'Unknown';
+  } catch (error: any) {
+    const errorMessage = error?.message || String(error);
+    const errorStatus = error?.status;
 
     console.error("💥 Photo selection error:", {
       message: errorMessage,
-      stack: errorStack,
-      name: errorName
+      status: errorStatus,
+      name: error?.name,
+      stack: error?.stack,
     });
 
-    // Provide more specific error messages
-    if (errorMessage.includes('API Error')) {
-      throw new Error(`Gemini API Error: ${errorMessage}`);
-    } else if (errorMessage.includes('Expected')) {
-      throw new Error(`Photo analysis incomplete: ${errorMessage}`);
-    } else {
-      throw new Error(`Photo analysis failed: ${errorMessage}`);
+    if (errorStatus === 413 || errorMessage.includes('413')) {
+      throw new Error("The uploaded photos are too large, even after compression. Please try selecting fewer photos or using smaller image files.");
     }
+    if (errorMessage.includes('timed out')) {
+      throw new Error("The photo analysis timed out. This can happen with very large images or a slow connection. Please try again.");
+    }
+    if (errorMessage.includes('CONVERT_FAIL')) {
+       throw new Error(`An image could not be processed. Please check that it's a standard JPEG, PNG, or WebP file and try again. The system reported: ${errorMessage}`);
+    }
+    if (errorMessage.includes('API Error')) {
+      throw new Error(`The AI analysis failed. The server said: "${errorMessage}". This might be a temporary issue. Please try again in a few moments.`);
+    }
+    
+    // Generic fallback
+    throw new Error(`Failed to analyze photos. Please try again.`);
   }
 };
 
 export const refineBioWithChatFeedback = async (
   currentBio: string,
   feedback: string,
-  refinementSettings?: RefinementSettings
+  refinementSettings?: RefinementSettings,
+  forceChange: boolean = false,
+  providerOverride?: 'gemini' | 'openai'
 ): Promise<string> => {
   // Add refinement context if available
   let refinementContext = '';
@@ -546,7 +886,7 @@ ${locationInstruction}
 `;
   }
 
-  const prompt = `You are an expert dating profile editor. A user has an existing bio and wants to make a small change. Your task is to subtly edit the bio to incorporate the user's feedback while preserving the original tone and core message. Do not rewrite the entire bio from scratch.
+  const prompt = `You are an expert dating profile editor. A user has an existing bio and wants to make a small change. Your task is to subtly edit the bio to incorporate the user's feedback while preserving the original tone and core message. Do not rewrite the entire bio from scratch unless the request requires it.
 
 **Current Bio:**
 "${currentBio}"
@@ -558,8 +898,10 @@ ${refinementContext}
 
 **CRITICAL RULES:**
 - Apply the user's change gracefully and intelligently while maintaining the targeting preferences above
+- The edited text MUST be different from the Current Bio; reflect the user's request clearly (even if small)
 - Keep the bio short, modern, and engaging (around 45 words)
-- Your response MUST BE ONLY the edited bio text itself. No introductions, no explanations, no markdown. Just the pure bio text.`;
+- Your response MUST BE ONLY the edited bio text itself. No introductions, no explanations, no markdown. Just the pure bio text.
+${forceChange ? '**FORCE CHANGE:** The edited bio MUST be noticeably different from the Current Bio. Make at least one substantive change (wording, tone, structure) that clearly reflects the user’s request.' : ''}`;
 
   const requestBody = {
     contents: [{
@@ -567,13 +909,14 @@ ${refinementContext}
     }],
     safetySettings: DEFAULT_SAFETY_SETTINGS,
     generationConfig: {
-      temperature: 0.1,  // Lower temperature for more precise editing
+      temperature: forceChange ? 0.3 : 0.1,  // Slightly higher when forcing change
       maxOutputTokens: 200
     }
   };
 
   try {
-    const response = await callGeminiAPI(`models/${GEMINI_TEXT_MODEL}:generateContent`, requestBody, 30000);
+    // Server-side env decides the model (no client-side baked model)
+    const response = await callGeminiAPI('models/:generateContent', requestBody, 30000, providerOverride);
 
     if (response.candidates && response.candidates[0] && response.candidates[0].content) {
       const text = response.candidates[0].content.parts[0]?.text;

@@ -1,9 +1,11 @@
 
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
+import imageCompression from 'browser-image-compression';
 import { UploadedPhoto } from '../types';
 import Button from './common/Button';
-import Alert from './common/Alert'; 
+import Alert from './common/Alert';
+import LoadingSpinner from './LoadingSpinner';
 
 interface PhotoUploadFormProps {
   onSubmit: (photos: UploadedPhoto[]) => void;
@@ -16,6 +18,7 @@ const PhotoUploadForm: React.FC<PhotoUploadFormProps> = ({ onSubmit, maxPhotos, 
   const [photoPreviews, setPhotoPreviews] = useState<UploadedPhoto[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [isCompressing, setIsCompressing] = useState(false);
   const [showOverlay, setShowOverlay] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const expectingFileRef = useRef(false);
@@ -43,34 +46,75 @@ const PhotoUploadForm: React.FC<PhotoUploadFormProps> = ({ onSubmit, maxPhotos, 
   }, [photoPreviews.length]);
 
 
-  const processFiles = (filesToProcess: File[]) => {
+  const processFiles = async (filesToProcess: File[]) => {
     if (selectedFiles.length + filesToProcess.length > maxPhotos) {
       setError(`You can upload a maximum of ${maxPhotos} photos. Please select fewer files or remove existing ones.`);
       return;
     }
+    
+    setIsCompressing(true);
+    setError(null);
 
-    const newUploadedPhotos: UploadedPhoto[] = filesToProcess
-      .filter(file => {
-        // Robust image detection:
-        // - Prefer MIME type when available (covers JPEG, PNG, WEBP, HEIC/HEIF, AVIF if the UA provides it)
-        // - Fallback to filename extension for cases where Android/Photos omits MIME
-        const hasImageMime = typeof file.type === 'string' && file.type.startsWith('image/');
-        const seemsImageByExt = /\.(jpe?g|png|webp|heic|heif|avif)$/i.test(file.name || '');
-        return hasImageMime || seemsImageByExt;
-      })
-      .map(file => ({
-        id: `${file.name}-${Date.now()}-${Math.random()}`, // More unique ID
+    const validFiles = filesToProcess.filter(file => {
+      const hasSupportedMime = typeof file.type === 'string' && /^(image\/jpeg|image\/png|image\/webp)$/i.test(file.type);
+      const hasSupportedExt = /\.(jpe?g|png|webp)$/i.test(file.name || '');
+      const isZeroBytes = typeof file.size === 'number' ? file.size === 0 : true;
+      if (isZeroBytes) {
+        console.warn('[PhotoUploadForm] Skipping zero-byte or cloud-only file:', file.name);
+        return false;
+      }
+      return hasSupportedMime || hasSupportedExt;
+    });
+
+    if (validFiles.length !== filesToProcess.length) {
+      setError(`Some files were not accepted. Supported types: JPEG, PNG, WebP. If selecting from Google Photos, save the photo to your device first, then upload.`);
+    }
+
+    const compressionOptions = {
+      maxSizeMB: 2, // Max file size in MB
+      maxWidthOrHeight: 1920, // Max width or height
+      useWebWorker: true,
+      fileType: 'image/jpeg',
+      initialQuality: 0.8
+    };
+
+    try {
+      const compressedFiles = await Promise.all(validFiles.map(async (file) => {
+          try {
+              console.log(`Original size: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
+              const compressedFile = await imageCompression(file, compressionOptions);
+              console.log(`Compressed size: ${(compressedFile.size / 1024 / 1024).toFixed(2)} MB`);
+              return compressedFile;
+          } catch (error) {
+              console.error(`Could not compress image ${file.name}:`, error);
+              // Return null for failed compressions to filter out later
+              return null;
+          }
+      }));
+        
+      const successfulFiles = compressedFiles.filter((f): f is File => f !== null);
+
+      if (successfulFiles.length !== validFiles.length) {
+          setError(prev => (prev ? prev + " " : "") + "Some images could not be processed. Please try them again or choose different photos.");
+      }
+
+      const newUploadedPhotos: UploadedPhoto[] = successfulFiles.map(file => ({
+        id: `${file.name}-${Date.now()}-${Math.random()}`,
         file,
         objectURL: URL.createObjectURL(file),
       }));
-    
-    if (newUploadedPhotos.length !== filesToProcess.length) {
-        setError(`Some files were not recognized as images and were ignored. Supported types include JPEG, PNG, WebP, HEIC/HEIF, and AVIF.`);
-    }
 
-    setSelectedFiles(prev => [...prev, ...newUploadedPhotos.map(p => p.file)]);
-    setPhotoPreviews(prev => [...prev, ...newUploadedPhotos]);
-    setShowOverlay(true);
+      setSelectedFiles(prev => [...prev, ...newUploadedPhotos.map(p => p.file)]);
+      setPhotoPreviews(prev => [...prev, ...newUploadedPhotos]);
+      if (newUploadedPhotos.length > 0) {
+        setShowOverlay(true);
+      }
+    } catch (error) {
+      console.error('An error occurred during image processing:', error);
+      setError('An unexpected error occurred while processing images. Please try again.');
+    } finally {
+      setIsCompressing(false);
+    }
   }
 
   const handleFileChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
@@ -176,18 +220,27 @@ const PhotoUploadForm: React.FC<PhotoUploadFormProps> = ({ onSubmit, maxPhotos, 
           role="button"
           tabIndex={0}
           onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') handleUploadAreaClick()}}
-          className={`w-full flex flex-col items-center justify-center px-4 py-10 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg shadow-md tracking-wide border-2 border-dashed  hover:border-purple-500 transition-all duration-300 ease-in-out
+          className={`w-full flex flex-col items-center justify-center px-4 py-10 bg-slate-700  text-slate-300 rounded-lg shadow-md tracking-wide border-2 border-dashed transition-all duration-300 ease-in-out
                       ${isDragging ? 'border-purple-600 bg-slate-600 scale-105' : 'border-slate-500'}
-                      ${!showOverlay ? 'cursor-pointer' : 'cursor-default'}`}
+                      ${!showOverlay && !isCompressing ? 'cursor-pointer hover:bg-slate-600 hover:border-purple-500' : 'cursor-default'}`}
         >
-          <svg className="w-12 h-12 mb-3 text-purple-400" fill="currentColor" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
-            <path d="M16.88 9.1A4 4 0 0 1 16 17H5a5 5 0 0 1-1-9.9V7a3 3 0 0 1 4.52-2.59A4.98 4.98 0 0 1 17 8c0 .38-.04.74-.12 1.1zM11 11h3l-4-4-4 4h3v3h2v-3z" />
-          </svg>
-          <span className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-500">{isDragging ? 'Drop Photos to Begin!' : 'Upload Your Photos'}</span>
-          <p className="text-base text-slate-300 mt-2 text-center max-w-xs">
-            Let us find your best shots & help build a profile that gets noticed.
-          </p>
-          <span className="text-sm mt-3 text-slate-400">(Max {maxPhotos} files. {numToSelect} recommended minimum)</span>
+          {isCompressing ? (
+            <div className="flex flex-col items-center">
+              <LoadingSpinner />
+              <span className="mt-4 text-lg text-slate-300">Optimizing images...</span>
+            </div>
+          ) : (
+            <>
+              <svg className="w-12 h-12 mb-3 text-purple-400" fill="currentColor" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+                <path d="M16.88 9.1A4 4 0 0 1 16 17H5a5 5 0 0 1-1-9.9V7a3 3 0 0 1 4.52-2.59A4.98 4.98 0 0 1 17 8c0 .38-.04.74-.12 1.1zM11 11h3l-4-4-4 4h3v3h2v-3z" />
+              </svg>
+              <span className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-500">{isDragging ? 'Drop Photos to Begin!' : 'Upload Your Photos'}</span>
+              <p className="text-base text-slate-300 mt-2 text-center max-w-xs">
+                Let us find your best shots & help build a profile that gets noticed.
+              </p>
+              <span className="text-sm mt-3 text-slate-400">(Max {maxPhotos} files. {numToSelect} recommended minimum)</span>
+            </>
+          )}
         </div>
         
         {showOverlay && photoPreviews.length > 0 && (
@@ -225,7 +278,7 @@ const PhotoUploadForm: React.FC<PhotoUploadFormProps> = ({ onSubmit, maxPhotos, 
           ref={fileInputRef}
           type="file"
           multiple
-          accept="image/*"
+          accept="image/jpeg,image/png,image/webp"
           onChange={handleFileChange}
           className="hidden"
         />

@@ -9,10 +9,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "browser-image-compression": "^2.0.2",
+    "cloudinary": "^2.7.0",
     "jszip": "3.10.1",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "@google/generative-ai": "^0.21.0"
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

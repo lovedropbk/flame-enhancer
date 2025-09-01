@@ -37,6 +37,8 @@ export interface GeneratedProfile {
   selectedPhotos: SelectedPhoto[];
   userName?: string; // User's name from questionnaire
   userAge?: string; // User's age from questionnaire
+  provider?: 'gemini' | 'openai'; // Which provider generated the bio
+  modelVersion?: string; // Model name/version used by provider
 }
 
 export interface RefinementSettings {
