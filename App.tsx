@@ -2,7 +2,7 @@
 
 import React, { useState, useCallback } from 'react';
 import { AppStep, QuestionnaireAnswers, UploadedPhoto, GeneratedProfile, SelectedPhoto, RefinementSettings } from './types';
-import { generateBioFromAnswers, selectBestPhotos, refineBioWithChatFeedback } from './services/geminiService';
+import { generateBioFromAnswers, selectBestPhotos, refineBioWithChatFeedback, superchargePhoto } from './services/geminiService';
 import { uploadAndEnhanceImage } from './services/cloudinaryService';
 import { ESSENTIAL_QUESTIONS, MAX_UPLOAD_PHOTOS, NUM_PHOTOS_TO_SELECT } from './constants';
 
@@ -481,6 +481,57 @@ const App: React.FC = () => {
   }, [chatRefinementCount, generatedProfile, isBioLoading, currentRefinementSettings]);
 
 
+  const urlToBase64 = async (url: string): Promise<{ base64Data: string; mimeType: string }> => {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch image from URL: ${url}`);
+    }
+    const blob = await response.blob();
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const result = reader.result as string;
+        const base64Data = result.split(',')[1];
+        const mimeType = blob.type;
+        resolve({ base64Data, mimeType });
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  };
+
+  const handleSuperchargePhoto = useCallback(async (photoId: string) => {
+    if (!generatedProfile) return;
+
+    const photoToSupercharge = generatedProfile.selectedPhotos.find(p => p.id === photoId);
+    if (!photoToSupercharge || !photoToSupercharge.enhancedObjectURL) {
+      setError("Cannot supercharge a photo that has not been enhanced first.");
+      return;
+    }
+
+    try {
+      // Use the enhanced URL as the source
+      const { base64Data, mimeType } = await urlToBase64(photoToSupercharge.enhancedObjectURL);
+      const superchargedImage = await superchargePhoto(base64Data, mimeType);
+
+      setGeneratedProfile(currentProfile => {
+        if (!currentProfile) return null;
+        const updatedPhotos = currentProfile.selectedPhotos.map(p => {
+          if (p.id === photoId) {
+            // Update the enhancedObjectURL with the new supercharged version
+            return { ...p, enhancedObjectURL: superchargedImage };
+          }
+          return p;
+        });
+        return { ...currentProfile, selectedPhotos: updatedPhotos };
+      });
+    } catch (err) {
+      console.error("Supercharge failed:", err);
+      const errorMessage = err instanceof Error ? err.message : "An unknown error occurred during supercharge.";
+      setError(errorMessage);
+    }
+  }, [generatedProfile]);
+
   const handleReset = useCallback(() => {
     setCurrentStep('welcome');
     setEssentialAnswers({});
@@ -547,6 +598,7 @@ const App: React.FC = () => {
               onOpenRefinementModal={() => setIsRefinementModalOpen(true)}
               onChatBioRefine={handleChatBioRefine}
               chatRefinementCount={chatRefinementCount}
+              onSuperchargePhoto={handleSuperchargePhoto}
             />
           );
         }

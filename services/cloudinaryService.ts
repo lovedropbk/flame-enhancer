@@ -1,4 +1,5 @@
 import { SelectedPhoto } from '../types';
+import { downsizeImage } from '../utils/imageProcessor';
 
 const CLOUD_NAME = 'ddyevx5fl';
 const UPLOAD_PRESET = 'magify';
@@ -111,13 +112,21 @@ export const buildAnalysisUrl = (originalUrl: string, maxWidth: number = 640): s
  * - analysis: a transformed delivery URL suited for model ingestion (smaller width/quality)
  */
 export const uploadForAnalysis = async (file: File, maxWidth: number = 640, onProgress?: (progress: number) => void): Promise<{ original: string; analysis: string; }> => {
-    console.log(`[cloudinaryService] [analysis] Starting upload process for ${file.name}`);
+    console.log(`[cloudinaryService] [analysis] Starting upload for ${file.name}, original size: ${file.size}`);
+
+    const downsizedBlob = await downsizeImage(file, 1024, 1024);
+    const downsizedFile = new File([downsizedBlob], file.name, {
+      type: 'image/jpeg',
+      lastModified: Date.now(),
+    });
+    console.log(`[cloudinaryService] [analysis] Downsized to: ${downsizedFile.size}`);
+
 
     // High-quality, but reasonably compressed, settings for the original upload
     const uploadPreset = 'magify'; // Assuming this is your general-purpose preset
 
     const formData = new FormData();
-    formData.append('file', file);
+    formData.append('file', downsizedFile);
     formData.append('upload_preset', uploadPreset);
 
     const cloudinaryUrl = `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`;

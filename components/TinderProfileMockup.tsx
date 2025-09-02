@@ -15,9 +15,11 @@ interface TinderProfileMockupProps {
   enhancementProgress: number | null;
   onRegenerateBio: (tone?: string) => void;
   isBioLoading: boolean;
+  onSuperchargePhoto?: (photoId: string) => void;
+  superchargingState?: { [key: string]: boolean };
 }
 
-const TinderProfileMockup: React.FC<TinderProfileMockupProps> = ({ userName, userAge, bio, photos, isEnhancing, enhancementProgress, onRegenerateBio, isBioLoading }) => {
+const TinderProfileMockup: React.FC<TinderProfileMockupProps> = ({ userName, userAge, bio, photos, isEnhancing, enhancementProgress, onRegenerateBio, isBioLoading, onSuperchargePhoto, superchargingState }) => {
   console.log("--- Step 7: Inside TinderProfileMockup ---");
   console.log("Received props:", { userName, userAge, bio, photos });
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
@@ -135,6 +137,37 @@ const TinderProfileMockup: React.FC<TinderProfileMockupProps> = ({ userName, use
                   )}
                 </button>
               )}
+
+              {/* Supercharge Button on Photo */}
+                {onSuperchargePhoto && currentPhoto && !isEnhancing && (
+                    <div className="absolute top-4 right-4 z-20">
+                        <div className="relative group">
+                            <Button
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    onSuperchargePhoto(currentPhoto.id);
+                                }}
+                                disabled={!currentPhoto.enhancedObjectURL || superchargingState?.[currentPhoto.id]}
+                                variant="secondary"
+                                size="icon"
+                                className="bg-black/50 hover:bg-black/70 text-white rounded-full transition-all duration-200"
+                                title="Supercharge your looks"
+                            >
+                                {superchargingState?.[currentPhoto.id] ? (
+                                    <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                ) : (
+                                    '✨'
+                                )}
+                            </Button>
+                            <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 w-max bg-black/80 text-white text-xs rounded py-1 px-2 opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none">
+                                Supercharge your looks
+                            </div>
+                        </div>
+                    </div>
+                )}
 
               {/* Gradient overlay for text */}
               <div className="absolute bottom-0 left-0 right-0 h-1/3 bg-gradient-to-t from-black/80 via-black/50 to-transparent"></div>

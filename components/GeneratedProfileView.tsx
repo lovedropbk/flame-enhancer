@@ -19,24 +19,39 @@ interface GeneratedProfileViewProps {
   onOpenRefinementModal: () => void;
   onChatBioRefine: (feedback: string) => void;
   chatRefinementCount: number;
+  onSuperchargePhoto: (photoId: string) => Promise<void>; // New prop for supercharging
 }
 
-const GeneratedProfileView: React.FC<GeneratedProfileViewProps> = ({ 
-    profile, 
-    onReset, 
-    isPreliminary, 
-    onEnhanceAllPhotos, 
-    isEnhancing, 
+const GeneratedProfileView: React.FC<GeneratedProfileViewProps> = ({
+    profile,
+    onReset,
+    isPreliminary,
+    onEnhanceAllPhotos,
+    isEnhancing,
     enhancementProgress,
     onRegenerateBio,
     isBioLoading,
     onOpenRefinementModal,
     onChatBioRefine,
-    chatRefinementCount
+    chatRefinementCount,
+    onSuperchargePhoto
 }) => {
   const [isDownloading, setIsDownloading] = useState(false);
   const [isDownloadingPictures, setIsDownloadingPictures] = useState(false);
   const [isDesktop, setIsDesktop] = useState(true);
+  const [superchargingState, setSuperchargingState] = useState<{ [key: string]: boolean }>({});
+
+  const handleSupercharge = async (photoId: string) => {
+    setSuperchargingState(prev => ({ ...prev, [photoId]: true }));
+    try {
+      await onSuperchargePhoto(photoId);
+    } catch (error) {
+      console.error("Supercharge failed from view:", error);
+      // Optionally, show an error to the user
+    } finally {
+      setSuperchargingState(prev => ({ ...prev, [photoId]: false }));
+    }
+  };
 
   useEffect(() => {
     const checkIsDesktop = () => setIsDesktop(window.innerWidth > 768);
@@ -150,6 +165,8 @@ const GeneratedProfileView: React.FC<GeneratedProfileViewProps> = ({
         enhancementProgress={enhancementProgress}
         onRegenerateBio={onRegenerateBio}
         isBioLoading={isBioLoading}
+        onSuperchargePhoto={handleSupercharge}
+        superchargingState={superchargingState}
       />
       
       {!isPreliminary && (

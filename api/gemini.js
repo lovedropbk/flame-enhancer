@@ -27,21 +27,27 @@ const SERVER_JSON_SOFT_WARN = 3_900_000; // ~3.9MB
 const INLINE_BYTES_SOFT_WARN = 3_400_000; // ~3.4MB worth of base64 payload (raw decoded bytes)
 
 async function fetchUrlAsInlineData(url, index) {
-  console.log("🌐 Fetching image URL for inlineData", { index, url });
+  // Force JPEG format from Cloudinary, as JXL etc. are not supported by Gemini.
+  const fetchUrl = url.replace(/\.jxl$/, ".jpg");
+  console.log("🌐 Fetching image URL for inlineData", { index, originalUrl: url, fetchUrl });
+
   let resp;
   try {
-    resp = await fetch(url);
+    resp = await fetch(fetchUrl);
   } catch (e) {
-    console.error("❌ Failed to fetch image URL", { index, url, error: e?.message || String(e) });
-    throw new Error(`Failed to fetch image for analysis at ${url}: ${e?.message || e}`);
+    console.error("❌ Failed to fetch image URL", { index, fetchUrl, error: e?.message || String(e) });
+    throw new Error(`Failed to fetch image for analysis at ${fetchUrl}: ${e?.message || e}`);
   }
+
   if (!resp.ok) {
     console.error("❌ Non-OK response when fetching image", {
-      index, url, status: resp.status, statusText: resp.statusText
+      index, fetchUrl, status: resp.status, statusText: resp.statusText,
     });
     throw new Error(`Image fetch failed: ${resp.status} ${resp.statusText}`);
   }
-  const mimeType = resp.headers.get("content-type") || "image/jpeg";
+
+  // Always treat the fetched image as JPEG, as that's what we requested.
+  const mimeType = "image/jpeg";
   const ab = await resp.arrayBuffer();
   const b64 = Buffer.from(new Uint8Array(ab)).toString("base64");
   return { mimeType, data: b64, rawBytes: ab.byteLength };
@@ -210,6 +216,25 @@ export default async function handler(req, res) {
 
       const result = await model.generateContent(requestPayload);
       const resp = result?.response;
+
+      if (modelName.includes("image")) {
+        const imagePart = resp?.candidates?.[0]?.content?.parts?.find((p) => p.inlineData);
+        if (imagePart) {
+          const geminiShaped = {
+            provider: "gemini",
+            candidates: [
+              {
+                content: {
+                  parts: [imagePart],
+                },
+              },
+            ],
+            usageMetadata: resp?.usageMetadata,
+            modelVersion: modelName,
+          };
+          return res.status(200).json(geminiShaped);
+        }
+      }
 
       let assistantText = "";
       try {

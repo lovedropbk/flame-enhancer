@@ -933,3 +933,54 @@ ${forceChange ? '**FORCE CHANGE:** The edited bio MUST be noticeably different f
     throw new Error("Failed to refine bio. Please try again.");
   }
 };
+
+export const superchargePhoto = async (base64Data: string, mimeType: string): Promise<string> => {
+  const prompt = `You are a world-class photo editor specializing in dating profiles. Your task is to subtly enhance the provided photo to make the person look more attractive, confident, and appealing. The goal is a noticeable improvement (+2 on a 1-10 scale) that is not immediately obvious as an AI edit.
+
+**Enhancement Guidelines:**
+1.  **Identity Preservation:** Do NOT change the person's core identity. Facial structure, unique features, and ethnicity must be preserved.
+2.  **Attractiveness Boost:** Subtly improve facial symmetry, skin clarity (while preserving realistic texture), and teeth brightness.
+3.  **Youthful Appearance:** Reduce the apparent age by a few years by softening harsh lines and improving skin vitality, but keep it plausible.
+4.  **Body Contouring:** If applicable, slightly reduce body weight and enhance muscle definition for a healthier, more fit appearance.
+5.  **Lighting and Color:** Improve lighting to be more flattering. Enhance colors to make the photo pop.
+6.  **Realism:** The final image MUST look like a real, high-quality photograph. Avoid any signs of AI generation, such as plastic-looking skin or unnatural features.
+
+**CRITICAL RULES:**
+- Your response MUST be ONLY the image data. No text, no explanations, no markdown.`;
+
+  const requestBody = {
+    contents: [{
+      parts: [
+        { text: prompt },
+        {
+          inlineData: {
+            mimeType,
+            data: base64Data,
+          },
+        },
+      ],
+    }],
+    safetySettings: DEFAULT_SAFETY_SETTINGS,
+    generationConfig: {
+      temperature: 0.4,
+      maxOutputTokens: 8192,
+    },
+  };
+
+  try {
+    const response = await callGeminiAPI('models/gemini-2.5-flash-image-preview:generateContent', requestBody, 120000);
+
+    if (response.candidates && response.candidates[0] && response.candidates[0].content) {
+      const imagePart = response.candidates[0].content.parts.find((part: any) => part.inlineData);
+      if (imagePart) {
+        const { mimeType, data } = imagePart.inlineData;
+        return `data:${mimeType};base64,${data}`;
+      }
+    }
+
+    throw new Error("Invalid response format from Gemini API");
+  } catch (error) {
+    console.error("Error supercharging photo:", error);
+    throw new Error("Failed to supercharge photo. Please try again.");
+  }
+};
