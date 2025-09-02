@@ -64,6 +64,7 @@ const App: React.FC = () => {
   const [isRefinementModalOpen, setIsRefinementModalOpen] = useState<boolean>(false);
   const [chatRefinementCount, setChatRefinementCount] = useState<number>(0);
   const [currentRefinementSettings, setCurrentRefinementSettings] = useState<RefinementSettings | undefined>(undefined);
+  const [superchargingState, setSuperchargingState] = useState<{ [key: string]: boolean }>({});
 
   const handleStart = useCallback(() => {
     setCurrentStep('essentialQuestionnaire');
@@ -509,17 +510,22 @@ const App: React.FC = () => {
       return;
     }
 
+    setSuperchargingState(prev => ({ ...prev, [photoId]: true }));
+    setError(null);
+
     try {
-      // Use the enhanced URL as the source
       const { base64Data, mimeType } = await urlToBase64(photoToSupercharge.enhancedObjectURL);
       const superchargedImage = await superchargePhoto(base64Data, mimeType);
+      
+      const img = new Image();
+      img.src = superchargedImage;
+      await new Promise(resolve => { img.onload = resolve; });
 
       setGeneratedProfile(currentProfile => {
         if (!currentProfile) return null;
         const updatedPhotos = currentProfile.selectedPhotos.map(p => {
           if (p.id === photoId) {
-            // Update the enhancedObjectURL with the new supercharged version
-            return { ...p, enhancedObjectURL: superchargedImage };
+            return { ...p, superchargedObjectURL: superchargedImage };
           }
           return p;
         });
@@ -529,6 +535,8 @@ const App: React.FC = () => {
       console.error("Supercharge failed:", err);
       const errorMessage = err instanceof Error ? err.message : "An unknown error occurred during supercharge.";
       setError(errorMessage);
+    } finally {
+      setSuperchargingState(prev => ({ ...prev, [photoId]: false }));
     }
   }, [generatedProfile]);
 
@@ -599,6 +607,7 @@ const App: React.FC = () => {
               onChatBioRefine={handleChatBioRefine}
               chatRefinementCount={chatRefinementCount}
               onSuperchargePhoto={handleSuperchargePhoto}
+              superchargingState={superchargingState}
             />
           );
         }

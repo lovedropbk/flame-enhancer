@@ -57,18 +57,15 @@ const PhotoUploadForm: React.FC<PhotoUploadFormProps> = ({ onSubmit, maxPhotos, 
     setError(null);
 
     const validFiles = filesToProcess.filter(file => {
-      const hasSupportedMime = typeof file.type === 'string' && /^(image\/jpeg|image\/png|image\/webp)$/i.test(file.type);
-      const hasSupportedExt = /\.(jpe?g|png|webp)$/i.test(file.name || '');
-      const isZeroBytes = typeof file.size === 'number' ? file.size === 0 : true;
-      if (isZeroBytes) {
+      if (typeof file.size === 'number' && file.size === 0) {
         console.warn('[PhotoUploadForm] Skipping zero-byte or cloud-only file:', file.name);
         return false;
       }
-      return hasSupportedMime || hasSupportedExt;
+      return true;
     });
 
-    if (validFiles.length !== filesToProcess.length) {
-      setError(`Some files were not accepted. Supported types: JPEG, PNG, WebP. If selecting from Google Photos, save the photo to your device first, then upload.`);
+    if (validFiles.length < filesToProcess.length) {
+      console.warn('Some zero-byte files were filtered out.');
     }
 
     const compressionOptions = {
@@ -95,8 +92,8 @@ const PhotoUploadForm: React.FC<PhotoUploadFormProps> = ({ onSubmit, maxPhotos, 
         
       const successfulFiles = compressedFiles.filter((f): f is File => f !== null);
 
-      if (successfulFiles.length !== validFiles.length) {
-          setError(prev => (prev ? prev + " " : "") + "Some images could not be processed. Please try them again or choose different photos.");
+      if (successfulFiles.length < validFiles.length) {
+          console.warn(`Could not process ${validFiles.length - successfulFiles.length} files. They were likely unsupported types or corrupt.`);
       }
 
       const newUploadedPhotos: UploadedPhoto[] = successfulFiles.map(file => ({
@@ -292,7 +289,7 @@ const PhotoUploadForm: React.FC<PhotoUploadFormProps> = ({ onSubmit, maxPhotos, 
           ref={fileInputRef}
           type="file"
           multiple
-          accept="image/jpeg,image/png,image/webp"
+          accept="image/*"
           onChange={handleFileChange}
           className="hidden"
         />

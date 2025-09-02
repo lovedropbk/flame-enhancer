@@ -54,7 +54,7 @@ export const uploadAndEnhanceImage = async (file: File): Promise<{ original: str
     'e_enhance',
     'e_improve:100',
     'q_auto',
-    'f_auto'
+    'f_jpg'
   ];
   // Note: 'dpr_auto' was removed as per request.
   const transformationString = transformations.join(',');

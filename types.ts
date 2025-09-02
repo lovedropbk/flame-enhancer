@@ -30,6 +30,7 @@ export interface SelectedPhoto {
   reason: string;
   originalFileName: string;
   enhancedObjectURL?: string; // URL for the AI-enhanced photo
+  superchargedObjectURL?: string; // URL for the supercharged (Gemini Flash) photo
 }
 
 export interface GeneratedProfile {
